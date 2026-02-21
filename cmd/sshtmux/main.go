@@ -1,0 +1,226 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/vlad-zapp/sshtmux/internal/client"
+	"github.com/vlad-zapp/sshtmux/internal/config"
+	"github.com/vlad-zapp/sshtmux/internal/daemon"
+	"github.com/vlad-zapp/sshtmux/internal/mcpserver"
+	"github.com/vlad-zapp/sshtmux/internal/session"
+	"github.com/vlad-zapp/sshtmux/internal/sshclient"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		printUsage()
+		os.Exit(1)
+	}
+
+	switch os.Args[1] {
+	case "daemon":
+		runDaemon(os.Args[2:])
+	case "mcp":
+		runMCP()
+	case "status":
+		runStatus()
+	case "disconnect":
+		runDisconnect(os.Args[2:])
+	case "shutdown":
+		runShutdown()
+	case "help", "--help", "-h":
+		printUsage()
+	default:
+		runExec(os.Args[1:])
+	}
+}
+
+func printUsage() {
+	fmt.Fprintf(os.Stderr, `Usage:
+  sshtmux [user@]host command   Execute command on remote host
+  sshtmux status                Show cached connections
+  sshtmux disconnect [host]     Close cached connection
+  sshtmux shutdown              Stop the daemon
+  sshtmux daemon [--socket path] Run the daemon (auto-started by CLI)
+  sshtmux mcp                   Run MCP server (stdio)
+`)
+}
+
+func loadConfig() config.Config {
+	cfg, err := config.Load(config.DefaultPath())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: config load: %v\n", err)
+		return config.Default()
+	}
+	return cfg
+}
+
+func runExec(args []string) {
+	if len(args) < 2 {
+		fmt.Fprintf(os.Stderr, "Usage: sshtmux [user@]host command [args...]\n")
+		os.Exit(1)
+	}
+
+	host, user := parseHostUser(args[0])
+	command := strings.Join(args[1:], " ")
+
+	cfg := loadConfig()
+	c := client.NewClient(cfg.SocketPath)
+
+	if err := c.EnsureDaemon(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting daemon: %v\n", err)
+		os.Exit(1)
+	}
+
+	resp, err := c.Exec(host, user, command)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if resp.Error != "" {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", resp.Error)
+		os.Exit(1)
+	}
+
+	if resp.Output != "" {
+		fmt.Print(resp.Output)
+		if !strings.HasSuffix(resp.Output, "\n") {
+			fmt.Println()
+		}
+	}
+
+	os.Exit(resp.ExitCode)
+}
+
+func runDaemon(args []string) {
+	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
+	socketPath := fs.String("socket", "", "Unix socket path")
+	fs.Parse(args)
+
+	cfg := loadConfig()
+	if *socketPath != "" {
+		cfg.SocketPath = *socketPath
+	}
+
+	dialer := &sshclient.RealDialer{}
+	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
+		hs := cfg.HostSettings(host)
+		return session.New(ctx, dialer, host, user, session.Options{
+			SessionName:    hs.SessionName,
+			InitCommands:   hs.InitCommands,
+			TmuxSocketPath: cfg.TmuxSocketPath,
+		})
+	}
+
+	pool := daemon.NewConnPool(factory, cfg.ConnectionTimeout.Duration)
+	d, err := daemon.NewDaemon(pool, cfg.SocketPath, cfg.CommandTimeout.Duration)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Fprintf(os.Stderr, "sshtmux daemon listening on %s\n", cfg.SocketPath)
+	if err := d.Serve(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runMCP() {
+	cfg := loadConfig()
+	c := client.NewClient(cfg.SocketPath)
+
+	if err := c.EnsureDaemon(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting daemon: %v\n", err)
+		os.Exit(1)
+	}
+
+	srv := mcpserver.New(c)
+	if err := srv.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "MCP server error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runStatus() {
+	cfg := loadConfig()
+	c := client.NewClient(cfg.SocketPath)
+
+	resp, err := c.Status()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if resp.Error != "" {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", resp.Error)
+		os.Exit(1)
+	}
+
+	if isEmptyJSONList(resp.Output) {
+		fmt.Println("No active connections")
+		return
+	}
+
+	fmt.Println(resp.Output)
+}
+
+func runDisconnect(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintf(os.Stderr, "Usage: sshtmux disconnect [user@]host\n")
+		os.Exit(1)
+	}
+
+	host, user := parseHostUser(args[0])
+	cfg := loadConfig()
+	c := client.NewClient(cfg.SocketPath)
+
+	resp, err := c.Disconnect(host, user)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if !resp.Success {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", resp.Error)
+		os.Exit(1)
+	}
+	fmt.Println("Disconnected")
+}
+
+func runShutdown() {
+	cfg := loadConfig()
+	c := client.NewClient(cfg.SocketPath)
+
+	resp, err := c.Shutdown()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if !resp.Success {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", resp.Error)
+		os.Exit(1)
+	}
+	fmt.Println("Daemon shutting down")
+}
+
+func parseHostUser(arg string) (host, user string) {
+	if idx := strings.LastIndex(arg, "@"); idx >= 0 {
+		return arg[idx+1:], arg[:idx]
+	}
+	return arg, ""
+}
+
+// isEmptyJSONList checks if s is a JSON null or an empty JSON array.
+func isEmptyJSONList(s string) bool {
+	var items []json.RawMessage
+	if err := json.Unmarshal([]byte(s), &items); err != nil {
+		return s == "null"
+	}
+	return len(items) == 0
+}

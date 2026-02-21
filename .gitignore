@@ -1,0 +1,5 @@
+/sshtmux
+*.test
+coverage.out
+.mcp.json
+dgo.sh

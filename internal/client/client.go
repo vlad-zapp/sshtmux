@@ -1,0 +1,126 @@
+package client
+
+import (
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"time"
+
+	"github.com/vlad-zapp/sshtmux/internal/daemon"
+)
+
+const (
+	dialTimeout        = 5 * time.Second
+	operationDeadline  = 60 * time.Second
+	daemonPollInterval = 100 * time.Millisecond
+	daemonPollAttempts = 50 // 50 * 100ms = 5s
+)
+
+// Client communicates with the sshtmux daemon over a Unix socket.
+type Client struct {
+	SocketPath string
+}
+
+// NewClient creates a client with the given socket path.
+func NewClient(socketPath string) *Client {
+	return &Client{SocketPath: socketPath}
+}
+
+// Send sends a request to the daemon and returns the response.
+func (c *Client) Send(req daemon.Request) (*daemon.Response, error) {
+	conn, err := net.DialTimeout("unix", c.SocketPath, dialTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("connect to daemon: %w", err)
+	}
+	defer conn.Close()
+
+	conn.SetDeadline(time.Now().Add(operationDeadline))
+
+	if err := daemon.WriteMessage(conn, &req); err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+
+	var resp daemon.Response
+	if err := daemon.ReadMessage(conn, &resp); err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	return &resp, nil
+}
+
+// Exec is a convenience method for executing a command.
+func (c *Client) Exec(host, user, command string) (*daemon.Response, error) {
+	return c.Send(daemon.Request{
+		Type:    "exec",
+		Host:    host,
+		User:    user,
+		Command: command,
+	})
+}
+
+// Disconnect closes a cached connection.
+func (c *Client) Disconnect(host, user string) (*daemon.Response, error) {
+	return c.Send(daemon.Request{
+		Type: "disconnect",
+		Host: host,
+		User: user,
+	})
+}
+
+// Status gets active connection status.
+func (c *Client) Status() (*daemon.Response, error) {
+	return c.Send(daemon.Request{Type: "status"})
+}
+
+// Shutdown tells the daemon to stop.
+func (c *Client) Shutdown() (*daemon.Response, error) {
+	return c.Send(daemon.Request{Type: "shutdown"})
+}
+
+// EnsureDaemon starts the daemon if it's not already running.
+// Returns nil if the daemon is already running or was started successfully.
+func (c *Client) EnsureDaemon() error {
+	// Try to connect to see if daemon is running
+	conn, err := net.DialTimeout("unix", c.SocketPath, time.Second)
+	if err == nil {
+		conn.Close()
+		return nil
+	}
+
+	// Daemon not running - start it
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("find executable: %w", err)
+	}
+
+	// Ensure socket directory exists
+	if dir := filepath.Dir(c.SocketPath); dir != "" {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return fmt.Errorf("create socket directory: %w", err)
+		}
+	}
+
+	cmd := exec.Command(exe, "daemon", "--socket", c.SocketPath)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	cmd.Stdin = nil
+	// Start as a background process
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start daemon: %w", err)
+	}
+	// Release the child process
+	cmd.Process.Release()
+
+	// Wait for daemon to become ready
+	for range daemonPollAttempts {
+		time.Sleep(daemonPollInterval)
+		conn, err := net.DialTimeout("unix", c.SocketPath, time.Second)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+	}
+
+	return fmt.Errorf("daemon did not start within 5 seconds")
+}
