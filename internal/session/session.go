@@ -106,6 +106,12 @@ func (s *Session) startTmux(ctx context.Context, tmuxSocketPath string) error {
 		return fmt.Errorf("discover pane: %w", err)
 	}
 
+	// Disable mouse mode — it generates escape sequences that interfere
+	// with output parsing in control mode.
+	if _, err := ctrl.SendCommand(ctx, "set-option -p mouse off"); err != nil {
+		return fmt.Errorf("disable mouse: %w", err)
+	}
+
 	// Set TERM=dumb to disable ANSI colors, bracketed paste mode, etc.
 	// Set a simple PS1 prompt to avoid color codes from .bashrc prompt settings
 	// (PS1 is set before TERM=dumb takes effect on future commands).
