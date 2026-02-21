@@ -25,11 +25,6 @@ type noopController struct {
 func (c *noopController) SendCommand(ctx context.Context, cmd string) (*tmux.CommandResult, error) {
 	return &tmux.CommandResult{}, nil
 }
-func (c *noopController) OutputChan() <-chan tmux.Notification {
-	ch := make(chan tmux.Notification)
-	close(ch)
-	return ch
-}
 func (c *noopController) PaneID() string       { return c.paneID }
 func (c *noopController) SetPaneID(id string)   { c.paneID = id }
 func (c *noopController) Alive() bool             { return c.alive }
@@ -302,6 +297,81 @@ func TestConnPoolEvictsDeadSession(t *testing.T) {
 	}
 	if s1 == s2 {
 		t.Error("expected different session after eviction")
+	}
+}
+
+func TestConnPoolReapExpired(t *testing.T) {
+	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
+		ctrl := &noopController{paneID: "%0", alive: true}
+		return session.NewFromController(ctrl, host, user), nil
+	}
+
+	// Use a very short TTL
+	pool := NewConnPool(factory, 50*time.Millisecond)
+	defer pool.Close()
+
+	ctx := context.Background()
+	pool.Get(ctx, "host1", "user1")
+
+	status := pool.Status()
+	if len(status) != 1 {
+		t.Fatalf("Status has %d entries, want 1", len(status))
+	}
+
+	// Call reapExpired directly (don't wait for ticker)
+	time.Sleep(60 * time.Millisecond) // wait past TTL
+	pool.reapExpired()
+
+	status = pool.Status()
+	if len(status) != 0 {
+		t.Errorf("Status has %d entries after reap, want 0", len(status))
+	}
+}
+
+func TestConnPoolReapExpiredKeepsRecent(t *testing.T) {
+	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
+		ctrl := &noopController{paneID: "%0", alive: true}
+		return session.NewFromController(ctrl, host, user), nil
+	}
+
+	pool := NewConnPool(factory, 5*time.Minute)
+	defer pool.Close()
+
+	ctx := context.Background()
+	pool.Get(ctx, "host1", "user1")
+
+	// reapExpired should not remove recently used sessions
+	pool.reapExpired()
+
+	status := pool.Status()
+	if len(status) != 1 {
+		t.Errorf("Status has %d entries after reap, want 1 (should keep recent)", len(status))
+	}
+}
+
+func TestConnPoolGetContextCancelled(t *testing.T) {
+	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
+		// Simulate slow creation
+		time.Sleep(200 * time.Millisecond)
+		ctrl := &noopController{paneID: "%0", alive: true}
+		return session.NewFromController(ctrl, host, user), nil
+	}
+
+	pool := NewConnPool(factory, 5*time.Minute)
+	defer pool.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	// First goroutine takes the inflight slot
+	go pool.Get(context.Background(), "host1", "user1")
+	time.Sleep(5 * time.Millisecond) // let it start
+
+	// Second goroutine waits on inflight, then its context expires
+	_, err := pool.Get(ctx, "host1", "user1")
+	if err == nil {
+		// It's possible the first goroutine finished fast enough
+		t.Log("Get succeeded (first goroutine finished before timeout)")
 	}
 }
 

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -110,17 +111,19 @@ func (d *Daemon) handleConn(conn net.Conn) {
 }
 
 func (d *Daemon) dispatch(req Request) Response {
-	vlog.SetEnabled(req.Verbose)
+	ctx := context.Background()
+	var logBuf *bytes.Buffer
 	if req.Verbose {
-		vlog.StartCapture()
+		logBuf = &bytes.Buffer{}
+		ctx = vlog.WithWriter(ctx, logBuf)
 	}
 
-	vlog.Printf("daemon: dispatch type=%s host=%q user=%q command=%q", req.Type, req.Host, req.User, req.Command)
+	vlog.Logf(ctx, "daemon: dispatch type=%s host=%q user=%q command=%q", req.Type, req.Host, req.User, req.Command)
 
 	var resp Response
 	switch req.Type {
 	case "exec":
-		resp = d.handleExec(req)
+		resp = d.handleExec(ctx, req)
 	case "disconnect":
 		resp = d.handleDisconnect(req)
 	case "status":
@@ -135,23 +138,23 @@ func (d *Daemon) dispatch(req Request) Response {
 		resp = Response{Error: fmt.Sprintf("unknown request type: %s", req.Type)}
 	}
 
-	if req.Verbose {
-		resp.Logs = vlog.StopCapture()
+	if logBuf != nil {
+		resp.Logs = logBuf.String()
 	}
 	return resp
 }
 
-func (d *Daemon) handleExec(req Request) Response {
-	ctx, cancel := context.WithTimeout(context.Background(), d.commandTimeout)
+func (d *Daemon) handleExec(ctx context.Context, req Request) Response {
+	ctx, cancel := context.WithTimeout(ctx, d.commandTimeout)
 	defer cancel()
 
-	vlog.Printf("daemon: getting session for %s@%s", req.User, req.Host)
+	vlog.Logf(ctx, "daemon: getting session for %s@%s", req.User, req.Host)
 	sess, err := d.pool.Get(ctx, req.Host, req.User)
 	if err != nil {
 		return Response{Error: fmt.Sprintf("get session: %v", err)}
 	}
 
-	vlog.Printf("daemon: session ready, executing command")
+	vlog.Logf(ctx, "daemon: session ready, executing command")
 	result, err := sess.Exec(ctx, req.Command, 0)
 	if err != nil {
 		return Response{Error: fmt.Sprintf("exec: %v", err)}

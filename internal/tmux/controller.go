@@ -9,30 +9,16 @@ import (
 	"sync"
 )
 
-const (
-	// outputChanBuffer is the buffer size for the output notification channel.
-	outputChanBuffer = 4096
-)
-
 // CommandResult holds the result of a tmux command sent via control mode.
 type CommandResult struct {
 	Data  string // response data lines joined with newlines
 	Error string // non-empty if %error was received
 }
 
-// Notification represents an asynchronous tmux notification (e.g., %output).
-type Notification struct {
-	Type   MessageType
-	PaneID string
-	Data   string
-}
-
 // Controller interface for tmux control mode interaction.
 type Controller interface {
 	// SendCommand sends a tmux command and waits for %begin/%end or %error response.
 	SendCommand(ctx context.Context, cmd string) (*CommandResult, error)
-	// OutputChan returns a channel that receives %output notifications.
-	OutputChan() <-chan Notification
 	// PaneID returns the ID of the session's pane (e.g., "%0").
 	PaneID() string
 	// SetPaneID sets the pane ID (discovered from initial output).
@@ -53,8 +39,6 @@ type RealController struct {
 	mu     sync.Mutex // serializes writes and queue pushes
 	paneID string
 	paneIDMu sync.RWMutex
-
-	outputCh chan Notification
 
 	// FIFO queue of pending command response channels.
 	// Commands are serialized (mu), tmux responds in order, so FIFO works.
@@ -80,10 +64,9 @@ type commandResponse struct {
 // The caller must call Close() when done.
 func NewController(r io.Reader, w io.Writer) *RealController {
 	c := &RealController{
-		w:        w,
-		outputCh: make(chan Notification, outputChanBuffer),
-		startup:  make(chan struct{}),
-		done:     make(chan struct{}),
+		w:       w,
+		startup: make(chan struct{}),
+		done:    make(chan struct{}),
 	}
 	go c.readLoop(r)
 	return c
@@ -104,7 +87,6 @@ func (c *RealController) WaitStartup(ctx context.Context) error {
 
 func (c *RealController) readLoop(r io.Reader) {
 	defer close(c.done)
-	defer close(c.outputCh)
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB line buffer
 
@@ -138,16 +120,7 @@ func (c *RealController) readLoop(r io.Reader) {
 			c.deliverResponse(&CommandResult{Error: errMsg})
 
 		case MsgOutput:
-			// Non-blocking send: drop notification if buffer is full
-			// to prevent the reader goroutine from deadlocking.
-			select {
-			case c.outputCh <- Notification{
-				Type:   MsgOutput,
-				PaneID: msg.PaneID,
-				Data:   msg.Data,
-			}:
-			default:
-			}
+			// %output notifications are ignored; output is retrieved via capture-pane.
 		}
 	}
 
@@ -228,11 +201,6 @@ func (c *RealController) SendCommand(ctx context.Context, cmd string) (*CommandR
 	case <-c.done:
 		return nil, fmt.Errorf("controller closed")
 	}
-}
-
-// OutputChan returns the channel for receiving %output notifications.
-func (c *RealController) OutputChan() <-chan Notification {
-	return c.outputCh
 }
 
 // PaneID returns the current pane ID.

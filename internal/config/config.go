@@ -13,6 +13,8 @@ type HostConfig struct {
 	InitCommands   []string `toml:"init_commands"`
 	SessionName    string   `toml:"session_name"`
 	CommandTimeout Duration `toml:"command_timeout"`
+	Term           string   `toml:"term"`
+	HistoryLimit   int      `toml:"history_limit"`
 }
 
 type Config struct {
@@ -24,6 +26,8 @@ type Config struct {
 	PreCommand        string                `toml:"pre_command"`
 	IgnoreHostKeys    bool                  `toml:"ignore_host_keys"`
 	InitCommands      []string              `toml:"init_commands"`
+	Term              string                `toml:"term"`
+	HistoryLimit      int                   `toml:"history_limit"`
 	Host              map[string]HostConfig `toml:"host"`
 }
 
@@ -50,6 +54,8 @@ func Default() Config {
 		CommandTimeout:    Duration{30 * time.Second},
 		SocketPath:        socketPath,
 		IgnoreHostKeys:    true,
+		Term:              "dumb",
+		HistoryLimit:      50000,
 		Host:              make(map[string]HostConfig),
 	}
 }
@@ -97,6 +103,8 @@ func (c Config) HostSettings(host string) HostConfig {
 			InitCommands:   c.InitCommands,
 			SessionName:    c.SessionName,
 			CommandTimeout: c.CommandTimeout,
+			Term:           c.Term,
+			HistoryLimit:   c.HistoryLimit,
 		}
 	}
 	if hc.PreCommand == "" {
@@ -110,6 +118,12 @@ func (c Config) HostSettings(host string) HostConfig {
 	}
 	if hc.InitCommands == nil {
 		hc.InitCommands = c.InitCommands
+	}
+	if hc.Term == "" {
+		hc.Term = c.Term
+	}
+	if hc.HistoryLimit == 0 {
+		hc.HistoryLimit = c.HistoryLimit
 	}
 	return hc
 }

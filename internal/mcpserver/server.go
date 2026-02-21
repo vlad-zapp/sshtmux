@@ -6,6 +6,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/vlad-zapp/sshtmux/internal/daemon"
+	"github.com/vlad-zapp/sshtmux/internal/session"
 )
 
 // Sender sends requests to the daemon.
@@ -61,9 +62,9 @@ func (s *Server) handleExec(ctx context.Context, req *mcp.CallToolRequest, input
 		return errorResult(resp.Error), nil, nil
 	}
 
-	text := resp.Output
+	text := session.StripANSI(resp.Output)
 	if resp.ExitCode != 0 {
-		text = fmt.Sprintf("[exit code: %d]\n%s", resp.ExitCode, resp.Output)
+		text = fmt.Sprintf("[exit code: %d]\n%s", resp.ExitCode, text)
 	}
 
 	return &mcp.CallToolResult{

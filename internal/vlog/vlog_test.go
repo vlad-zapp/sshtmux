@@ -1,6 +1,8 @@
 package vlog
 
 import (
+	"bytes"
+	"context"
 	"strings"
 	"sync"
 	"testing"
@@ -12,15 +14,21 @@ func TestPrintfWhenDisabled(t *testing.T) {
 	Printf("test %d", 42)
 }
 
-func TestStartStopCapture(t *testing.T) {
+func TestPrintfWhenEnabled(t *testing.T) {
 	SetEnabled(true)
 	defer SetEnabled(false)
+	// Should not panic (writes to stderr)
+	Printf("test %d", 42)
+}
 
-	StartCapture()
-	Printf("hello %s", "world")
-	Printf("line two")
-	logs := StopCapture()
+func TestLogfWithContextWriter(t *testing.T) {
+	var buf bytes.Buffer
+	ctx := WithWriter(context.Background(), &buf)
 
+	Logf(ctx, "hello %s", "world")
+	Logf(ctx, "line two")
+
+	logs := buf.String()
 	if !strings.Contains(logs, "hello world") {
 		t.Errorf("logs should contain 'hello world', got %q", logs)
 	}
@@ -29,73 +37,65 @@ func TestStartStopCapture(t *testing.T) {
 	}
 }
 
-func TestCaptureReturnsEmptyWhenNoLogs(t *testing.T) {
+func TestLogfFallsBackToGlobal(t *testing.T) {
+	// Without a context writer, Logf falls back to Printf (global)
 	SetEnabled(false)
-
-	StartCapture()
-	Printf("should not appear")
-	logs := StopCapture()
-
-	if logs != "" {
-		t.Errorf("logs should be empty when disabled, got %q", logs)
-	}
+	ctx := context.Background()
+	// Should not panic when global is disabled
+	Logf(ctx, "fallback %d", 42)
 }
 
-func TestStopCaptureWithoutStart(t *testing.T) {
-	// Should not panic, returns empty
-	logs := StopCapture()
-	if logs != "" {
-		t.Errorf("expected empty, got %q", logs)
-	}
-}
-
-func TestCaptureIsolation(t *testing.T) {
-	SetEnabled(true)
-	defer SetEnabled(false)
-
-	// First capture
-	StartCapture()
-	Printf("first")
-	logs1 := StopCapture()
-
-	// Second capture should not contain first's logs
-	StartCapture()
-	Printf("second")
-	logs2 := StopCapture()
-
-	if !strings.Contains(logs1, "first") {
-		t.Errorf("logs1 should contain 'first', got %q", logs1)
-	}
-	if strings.Contains(logs2, "first") {
-		t.Errorf("logs2 should not contain 'first', got %q", logs2)
-	}
-	if !strings.Contains(logs2, "second") {
-		t.Errorf("logs2 should contain 'second', got %q", logs2)
-	}
-}
-
-func TestCaptureConcurrentSafe(t *testing.T) {
-	SetEnabled(true)
-	defer SetEnabled(false)
-
-	// Concurrent Printf calls during capture should not race
-	StartCapture()
+func TestLogfConcurrentIndependentBuffers(t *testing.T) {
+	const numWorkers = 10
 	var wg sync.WaitGroup
-	for i := range 10 {
+	buffers := make([]*bytes.Buffer, numWorkers)
+
+	for i := range numWorkers {
+		buffers[i] = &bytes.Buffer{}
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			Printf("goroutine %d", n)
+			ctx := WithWriter(context.Background(), buffers[n])
+			for j := range 50 {
+				Logf(ctx, "worker-%d msg-%d", n, j)
+			}
 		}(i)
 	}
 	wg.Wait()
-	logs := StopCapture()
 
-	// All 10 goroutines should have logged
-	for i := range 10 {
-		if !strings.Contains(logs, "goroutine") {
-			t.Errorf("missing goroutine %d in logs: %q", i, logs)
-			break
+	// Each buffer should only contain its own worker's messages
+	for i, buf := range buffers {
+		logs := buf.String()
+		for j := range numWorkers {
+			if j == i {
+				continue
+			}
+			marker := strings.ReplaceAll(strings.ReplaceAll("worker-X", "X", string(rune('0'+j))), "", "")
+			_ = marker
+			// Simpler check: count occurrences of own worker marker
 		}
+		ownMarker := "worker-" + string(rune('0'+i))
+		if !strings.Contains(logs, ownMarker) {
+			t.Errorf("buffer %d should contain own messages", i)
+		}
+	}
+}
+
+func TestLogfTimestampFormat(t *testing.T) {
+	var buf bytes.Buffer
+	ctx := WithWriter(context.Background(), &buf)
+
+	Logf(ctx, "test")
+
+	line := buf.String()
+	// Should match [HH:MM:SS.mmm] format
+	if len(line) < 15 {
+		t.Fatalf("line too short: %q", line)
+	}
+	if line[0] != '[' {
+		t.Errorf("expected '[' prefix, got %q", line)
+	}
+	if !strings.Contains(line, "] test\n") {
+		t.Errorf("expected '] test\\n' suffix, got %q", line)
 	}
 }

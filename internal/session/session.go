@@ -29,11 +29,13 @@ type Options struct {
 	PreCommand     string
 	InitCommands   []string
 	TmuxSocketPath string
+	Term           string
+	HistoryLimit   int
 }
 
 // New creates a new session: SSH connect → tmux -C → init commands.
 func New(ctx context.Context, dialer sshclient.Dialer, host, user string, opts Options) (*Session, error) {
-	vlog.Printf("session: creating for host=%q user=%q session_name=%q", host, user, opts.SessionName)
+	vlog.Logf(ctx, "session: creating for host=%q user=%q session_name=%q", host, user, opts.SessionName)
 	client, err := dialer.Dial(ctx, host, user)
 	if err != nil {
 		return nil, fmt.Errorf("ssh dial: %w", err)
@@ -46,16 +48,16 @@ func New(ctx context.Context, dialer sshclient.Dialer, host, user string, opts O
 		client:      client,
 	}
 
-	vlog.Printf("session: starting tmux (pre_command=%q tmux_socket=%q)", opts.PreCommand, opts.TmuxSocketPath)
-	if err := s.startTmux(ctx, opts.PreCommand, opts.TmuxSocketPath); err != nil {
+	vlog.Logf(ctx, "session: starting tmux (pre_command=%q tmux_socket=%q)", opts.PreCommand, opts.TmuxSocketPath)
+	if err := s.startTmux(ctx, opts); err != nil {
 		client.Close()
 		return nil, fmt.Errorf("start tmux: %w", err)
 	}
 
-	vlog.Printf("session: tmux started, running %d init commands", len(opts.InitCommands))
+	vlog.Logf(ctx, "session: tmux started, running %d init commands", len(opts.InitCommands))
 	// Run init commands
 	for _, cmd := range opts.InitCommands {
-		vlog.Printf("session: init command: %q", cmd)
+		vlog.Logf(ctx, "session: init command: %q", cmd)
 		if err := s.executor.RunInit(ctx, cmd); err != nil {
 			s.Close()
 			return nil, fmt.Errorf("init command %q: %w", cmd, err)
@@ -66,7 +68,9 @@ func New(ctx context.Context, dialer sshclient.Dialer, host, user string, opts O
 }
 
 // startTmux launches tmux in control mode and sets up the controller.
-func (s *Session) startTmux(ctx context.Context, preCommand, tmuxSocketPath string) error {
+func (s *Session) startTmux(ctx context.Context, opts Options) error {
+	preCommand := opts.PreCommand
+	tmuxSocketPath := opts.TmuxSocketPath
 	sess, err := s.client.NewSession()
 	if err != nil {
 		return fmt.Errorf("new session: %w", err)
@@ -95,30 +99,42 @@ func (s *Session) startTmux(ctx context.Context, preCommand, tmuxSocketPath stri
 	if preCommand != "" {
 		// Pre-command opens a new shell (e.g. "sudo -i"), so we can't use
 		// a one-liner. Start SSH in shell mode and send commands via stdin.
-		vlog.Printf("session: starting ssh in shell mode")
+		vlog.Logf(ctx, "session: starting ssh in shell mode")
 		if err := sess.Start(""); err != nil {
 			sess.Close()
 			return fmt.Errorf("start ssh shell: %w", err)
 		}
 
-		vlog.Printf("session: sending pre-command: %s", preCommand)
+		vlog.Logf(ctx, "session: sending pre-command: %s", preCommand)
 		fmt.Fprintf(stdin, "%s\n", preCommand)
 
-		// Wait for the pre-command to establish the new shell before
-		// sending the tmux command. This prevents the parent shell from
-		// buffering both lines in a single read.
-		time.Sleep(1 * time.Second)
+		// Wait for the new shell to produce any output (prompt, MOTD, etc.)
+		// This proves the pre-command has executed and the new shell is alive.
+		// Pty canonical mode guarantees the tmux command won't be consumed by
+		// the parent shell even if it arrives early.
+		buf := make([]byte, 4096)
+		readDone := make(chan struct{})
+		go func() {
+			stdout.Read(buf)
+			close(readDone)
+		}()
+		select {
+		case <-readDone:
+			vlog.Logf(ctx, "session: pre-command ready (stdout data received)")
+		case <-ctx.Done():
+			return fmt.Errorf("pre-command readiness: %w", ctx.Err())
+		}
 
-		vlog.Printf("session: sending tmux command: %s", tmuxCmd)
+		vlog.Logf(ctx, "session: sending tmux command: %s", tmuxCmd)
 		fmt.Fprintf(stdin, "%s\n", tmuxCmd)
 	} else {
-		vlog.Printf("session: starting remote command: %s", tmuxCmd)
+		vlog.Logf(ctx, "session: starting remote command: %s", tmuxCmd)
 		if err := sess.Start(tmuxCmd); err != nil {
 			sess.Close()
 			return fmt.Errorf("start tmux: %w", err)
 		}
 	}
-	vlog.Printf("session: ssh process started, waiting for tmux handshake")
+	vlog.Logf(ctx, "session: ssh process started, waiting for tmux handshake")
 
 	// Create controller
 	ctrl := tmux.NewController(stdout, stdin)
@@ -129,7 +145,7 @@ func (s *Session) startTmux(ctx context.Context, preCommand, tmuxSocketPath stri
 	if err := ctrl.WaitStartup(ctx); err != nil {
 		return fmt.Errorf("tmux startup: %w", err)
 	}
-	vlog.Printf("session: tmux handshake complete")
+	vlog.Logf(ctx, "session: tmux handshake complete")
 
 	// Discover pane ID from initial output
 	if err := s.discoverPane(ctx); err != nil {
@@ -142,22 +158,28 @@ func (s *Session) startTmux(ctx context.Context, preCommand, tmuxSocketPath stri
 		return fmt.Errorf("disable mouse: %w", err)
 	}
 
-	// Set a large scrollback buffer so capture-pane can retrieve all output
-	// even from commands that produce many lines. Non-fatal since default
-	// 2000 lines is usually enough.
-	ctrl.SendCommand(ctx, "set-option -p history-limit 50000")
+	// Set scrollback buffer so capture-pane can retrieve all output.
+	historyLimit := opts.HistoryLimit
+	if historyLimit <= 0 {
+		historyLimit = 50000
+	}
+	ctrl.SendCommand(ctx, fmt.Sprintf("set-option -p history-limit %d", historyLimit))
 
-	// Set TERM=dumb to disable ANSI colors, bracketed paste mode, etc.
-	// Set a simple PS1 prompt to avoid color codes from .bashrc prompt settings
-	// (PS1 is set before TERM=dumb takes effect on future commands).
-	// Disable bash history to avoid polluting it.
+	// Disable history first to prevent subsequent commands from being recorded.
+	// Set PS1='' (empty prompt) to eliminate prompt artifacts in output.
+	// Set TERM to minimize ANSI escape sequences at the source.
+	term := opts.Term
+	if term == "" {
+		term = "dumb"
+	}
 	initSetup := []struct {
 		cmd   string
 		fatal bool
 	}{
-		{"export TERM=dumb", true},
-		{"export PS1='$ '", true},
 		{"unset HISTFILE", false},
+		{"set +o history", false},
+		{"export PS1=''", true},
+		{fmt.Sprintf("export TERM=%s", term), true},
 	}
 	for _, init := range initSetup {
 		if err := s.executor.RunInit(ctx, init.cmd); err != nil {
@@ -182,7 +204,7 @@ func (s *Session) discoverPane(ctx context.Context) error {
 	if paneID == "" {
 		return fmt.Errorf("empty pane_id")
 	}
-	vlog.Printf("session: discovered pane %s", paneID)
+	vlog.Logf(ctx, "session: discovered pane %s", paneID)
 	s.ctrl.SetPaneID(paneID)
 	return nil
 }

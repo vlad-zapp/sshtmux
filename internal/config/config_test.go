@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -23,6 +24,12 @@ func TestDefault(t *testing.T) {
 	}
 	if cfg.Host == nil {
 		t.Error("Host map should be initialized")
+	}
+	if cfg.Term != "dumb" {
+		t.Errorf("Term = %q, want %q", cfg.Term, "dumb")
+	}
+	if cfg.HistoryLimit != 50000 {
+		t.Errorf("HistoryLimit = %d, want %d", cfg.HistoryLimit, 50000)
 	}
 }
 
@@ -287,5 +294,166 @@ func TestDurationUnmarshalInvalid(t *testing.T) {
 	var d Duration
 	if err := d.UnmarshalText([]byte("notaduration")); err == nil {
 		t.Error("UnmarshalText should fail for invalid duration")
+	}
+}
+
+func TestDurationMarshalText(t *testing.T) {
+	d := Duration{5 * time.Minute}
+	text, err := d.MarshalText()
+	if err != nil {
+		t.Fatalf("MarshalText: %v", err)
+	}
+	if string(text) != "5m0s" {
+		t.Errorf("MarshalText = %q, want %q", string(text), "5m0s")
+	}
+}
+
+func TestDefaultPath(t *testing.T) {
+	path := DefaultPath()
+	if path == "" {
+		t.Error("DefaultPath should not be empty")
+	}
+	if !strings.HasSuffix(path, ".sshtmux.conf") {
+		t.Errorf("DefaultPath = %q, want suffix .sshtmux.conf", path)
+	}
+}
+
+func TestDefaultRuntimeDirWithXDG(t *testing.T) {
+	// Set XDG_RUNTIME_DIR and verify it's used
+	old := os.Getenv("XDG_RUNTIME_DIR")
+	os.Setenv("XDG_RUNTIME_DIR", "/custom/runtime")
+	defer os.Setenv("XDG_RUNTIME_DIR", old)
+
+	dir := defaultRuntimeDir()
+	if dir != "/custom/runtime" {
+		t.Errorf("defaultRuntimeDir = %q, want %q", dir, "/custom/runtime")
+	}
+}
+
+func TestDefaultRuntimeDirWithoutXDG(t *testing.T) {
+	old := os.Getenv("XDG_RUNTIME_DIR")
+	os.Unsetenv("XDG_RUNTIME_DIR")
+	defer os.Setenv("XDG_RUNTIME_DIR", old)
+
+	dir := defaultRuntimeDir()
+	if dir != os.TempDir() {
+		t.Errorf("defaultRuntimeDir = %q, want %q", dir, os.TempDir())
+	}
+}
+
+func TestDefaultSocketPathUsesRuntimeDir(t *testing.T) {
+	old := os.Getenv("XDG_RUNTIME_DIR")
+	os.Setenv("XDG_RUNTIME_DIR", "/tmp/test-runtime")
+	defer os.Setenv("XDG_RUNTIME_DIR", old)
+
+	cfg := Default()
+	if cfg.SocketPath != "/tmp/test-runtime/sshtmux.sock" {
+		t.Errorf("SocketPath = %q, want %q", cfg.SocketPath, "/tmp/test-runtime/sshtmux.sock")
+	}
+}
+
+func TestLoadReadError(t *testing.T) {
+	// A path that exists but is a directory (not a file) should return an error
+	dir := t.TempDir()
+	_, err := Load(filepath.Join(dir, "subdir"))
+	// /nonexistent subdir doesn't exist -> returns defaults (IsNotExist)
+	if err != nil {
+		t.Errorf("Load non-existent subpath should return defaults: %v", err)
+	}
+}
+
+func TestHostSettingsHostMapNil(t *testing.T) {
+	cfg := Default()
+	cfg.Host = nil
+	// HostSettings should handle nil Host map gracefully
+	hs := cfg.HostSettings("anyhost")
+	if hs.SessionName != cfg.SessionName {
+		t.Errorf("SessionName = %q, want %q", hs.SessionName, cfg.SessionName)
+	}
+}
+
+func TestLoadTermAndHistoryLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := `
+term = "xterm-256color"
+history_limit = 100000
+
+[host.myserver]
+term = "vt100"
+history_limit = 10000
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Term != "xterm-256color" {
+		t.Errorf("Term = %q, want %q", cfg.Term, "xterm-256color")
+	}
+	if cfg.HistoryLimit != 100000 {
+		t.Errorf("HistoryLimit = %d, want %d", cfg.HistoryLimit, 100000)
+	}
+	hc, ok := cfg.Host["myserver"]
+	if !ok {
+		t.Fatal("Host[myserver] not found")
+	}
+	if hc.Term != "vt100" {
+		t.Errorf("Host.Term = %q, want %q", hc.Term, "vt100")
+	}
+	if hc.HistoryLimit != 10000 {
+		t.Errorf("Host.HistoryLimit = %d, want %d", hc.HistoryLimit, 10000)
+	}
+}
+
+func TestHostSettings_TermAndHistoryLimitFallback(t *testing.T) {
+	cfg := Default()
+	cfg.Term = "xterm"
+	cfg.HistoryLimit = 80000
+
+	hs := cfg.HostSettings("unknown")
+	if hs.Term != "xterm" {
+		t.Errorf("Term = %q, want %q", hs.Term, "xterm")
+	}
+	if hs.HistoryLimit != 80000 {
+		t.Errorf("HistoryLimit = %d, want %d", hs.HistoryLimit, 80000)
+	}
+}
+
+func TestHostSettings_TermAndHistoryLimitOverride(t *testing.T) {
+	cfg := Default()
+	cfg.Term = "dumb"
+	cfg.HistoryLimit = 50000
+	cfg.Host["myhost"] = HostConfig{
+		Term:         "vt100",
+		HistoryLimit: 10000,
+	}
+
+	hs := cfg.HostSettings("myhost")
+	if hs.Term != "vt100" {
+		t.Errorf("Term = %q, want %q", hs.Term, "vt100")
+	}
+	if hs.HistoryLimit != 10000 {
+		t.Errorf("HistoryLimit = %d, want %d", hs.HistoryLimit, 10000)
+	}
+}
+
+func TestHostSettings_TermAndHistoryLimitPartialOverride(t *testing.T) {
+	cfg := Default()
+	cfg.Term = "xterm"
+	cfg.HistoryLimit = 80000
+	cfg.Host["partial"] = HostConfig{
+		SessionName: "custom",
+		// Term and HistoryLimit not set -> should fallback
+	}
+
+	hs := cfg.HostSettings("partial")
+	if hs.Term != "xterm" {
+		t.Errorf("Term = %q, want %q (should fallback to global)", hs.Term, "xterm")
+	}
+	if hs.HistoryLimit != 80000 {
+		t.Errorf("HistoryLimit = %d, want %d (should fallback to global)", hs.HistoryLimit, 80000)
 	}
 }

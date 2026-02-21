@@ -64,11 +64,11 @@ func (p *ConnPool) Get(ctx context.Context, host, user string) (*session.Session
 			if entry.sess.Alive() {
 				entry.lastUsed = time.Now()
 				p.mu.Unlock()
-				vlog.Printf("pool: cache hit for %s", key)
+				vlog.Logf(ctx, "pool: cache hit for %s", key)
 				return entry.sess, nil
 			}
 			// Session is dead, evict from cache
-			vlog.Printf("pool: evicting dead session for %s", key)
+			vlog.Logf(ctx, "pool: evicting dead session for %s", key)
 			delete(p.sessions, key)
 			go entry.sess.Close()
 		}
@@ -91,7 +91,7 @@ func (p *ConnPool) Get(ctx context.Context, host, user string) (*session.Session
 		p.mu.Unlock()
 
 		// Create session outside of lock
-		vlog.Printf("pool: cache miss for %s, creating new session", key)
+		vlog.Logf(ctx, "pool: cache miss for %s, creating new session", key)
 		sess, err := p.factory(ctx, host, user)
 
 		p.mu.Lock()

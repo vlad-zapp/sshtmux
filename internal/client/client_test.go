@@ -12,17 +12,15 @@ import (
 	"github.com/vlad-zapp/sshtmux/internal/tmux"
 )
 
+// Ensure noopController satisfies the tmux.Controller interface.
+var _ tmux.Controller = (*noopController)(nil)
+
 type noopController struct {
 	paneID string
 }
 
 func (c *noopController) SendCommand(ctx context.Context, cmd string) (*tmux.CommandResult, error) {
 	return &tmux.CommandResult{}, nil
-}
-func (c *noopController) OutputChan() <-chan tmux.Notification {
-	ch := make(chan tmux.Notification)
-	close(ch)
-	return ch
 }
 func (c *noopController) PaneID() string     { return c.paneID }
 func (c *noopController) SetPaneID(id string) { c.paneID = id }

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/vlad-zapp/sshtmux/internal/session"
-	"github.com/vlad-zapp/sshtmux/internal/vlog"
 )
 
 func testFactory(ctx context.Context, host, user string) (*session.Session, error) {
@@ -196,10 +195,59 @@ func TestDaemonConcurrentClients(t *testing.T) {
 	}
 }
 
+func TestDaemonConcurrentVerboseRequests(t *testing.T) {
+	d, sockPath := startTestDaemon(t)
+	defer d.Stop()
+
+	// Send concurrent requests with different Verbose flags.
+	// With per-request context logging, there are no race conditions.
+	const numClients = 20
+	errs := make(chan error, numClients)
+
+	for i := range numClients {
+		go func(n int) {
+			verbose := n%2 == 0
+			conn, err := net.Dial("unix", sockPath)
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer conn.Close()
+
+			req := Request{
+				Type:    "exec",
+				Host:    "host1",
+				User:    "user1",
+				Command: "echo test",
+				Verbose: verbose,
+			}
+			if err := WriteMessage(conn, &req); err != nil {
+				errs <- err
+				return
+			}
+			var resp Response
+			if err := ReadMessage(conn, &resp); err != nil {
+				errs <- err
+				return
+			}
+			if resp.Error != "" {
+				errs <- fmt.Errorf("response error: %s", resp.Error)
+				return
+			}
+			errs <- nil
+		}(i)
+	}
+
+	for range numClients {
+		if err := <-errs; err != nil {
+			t.Errorf("client error: %v", err)
+		}
+	}
+}
+
 func TestDaemonVerboseReturnsLogs(t *testing.T) {
 	d, sockPath := startTestDaemon(t)
 	defer d.Stop()
-	defer vlog.SetEnabled(false)
 
 	// Non-verbose request should have no logs
 	resp := sendRequest(t, sockPath, Request{

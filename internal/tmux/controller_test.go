@@ -153,44 +153,6 @@ func TestControllerErrorResponse(t *testing.T) {
 	}
 }
 
-func TestControllerOutputNotifications(t *testing.T) {
-	_, cmdW := io.Pipe()
-	respR, respW := io.Pipe()
-
-	go func() {
-		fmt.Fprintf(respW, "%%output %%0 hello\\012\n")
-		fmt.Fprintf(respW, "%%output %%0 world\\012\n")
-		respW.Close()
-	}()
-
-	ctrl := NewController(respR, cmdW)
-	defer func() {
-		cmdW.Close()
-		ctrl.Close()
-	}()
-
-	var notifications []Notification
-	timeout := time.After(2 * time.Second)
-	for i := 0; i < 2; i++ {
-		select {
-		case n := <-ctrl.OutputChan():
-			notifications = append(notifications, n)
-		case <-timeout:
-			t.Fatal("timeout waiting for notifications")
-		}
-	}
-
-	if len(notifications) != 2 {
-		t.Fatalf("got %d notifications, want 2", len(notifications))
-	}
-	if notifications[0].Data != "hello\n" {
-		t.Errorf("[0] Data = %q, want %q", notifications[0].Data, "hello\n")
-	}
-	if notifications[1].Data != "world\n" {
-		t.Errorf("[1] Data = %q, want %q", notifications[1].Data, "world\n")
-	}
-}
-
 func TestControllerContextCancellation(t *testing.T) {
 	cmdR, cmdW := io.Pipe()
 	respR, _ := io.Pipe()
@@ -303,40 +265,6 @@ func TestControllerClosedReader(t *testing.T) {
 	}
 }
 
-func TestControllerHighVolumeOutput(t *testing.T) {
-	_, cmdW := io.Pipe()
-	respR, respW := io.Pipe()
-
-	const numNotifications = 1000
-
-	go func() {
-		for i := range numNotifications {
-			fmt.Fprintf(respW, "%%output %%0 line-%d\\012\n", i)
-		}
-		respW.Close()
-	}()
-
-	ctrl := NewController(respR, cmdW)
-	defer func() {
-		cmdW.Close()
-	}()
-
-	// Wait for readLoop to finish processing all input
-	<-ctrl.done
-
-	// Count all notifications that survived (non-blocking send may drop some)
-	count := 0
-	for range ctrl.OutputChan() {
-		count++
-	}
-	if count == 0 {
-		t.Error("received 0 notifications, expected at least some")
-	}
-	if count > numNotifications {
-		t.Errorf("received %d notifications, but only sent %d", count, numNotifications)
-	}
-}
-
 func TestControllerPaneID(t *testing.T) {
 	ctrl := &RealController{}
 	ctrl.SetPaneID("%5")
@@ -375,53 +303,23 @@ func TestControllerPaneIDConcurrent(t *testing.T) {
 	}
 }
 
-func TestControllerOutputChannelFull(t *testing.T) {
+func TestControllerHighVolumeOutput(t *testing.T) {
 	_, cmdW := io.Pipe()
 	respR, respW := io.Pipe()
 
-	// Send more notifications than the buffer can hold without reading
-	ctrl := NewController(respR, cmdW)
-	defer func() {
-		cmdW.Close()
-		respR.Close()
-	}()
-
-	// Fill buffer by sending outputChanBuffer+100 notifications.
-	// With non-blocking send, the readLoop should not deadlock.
+	// Send many %output notifications. readLoop should not deadlock
+	// since it just ignores them now (no channel to fill).
 	go func() {
-		for i := range outputChanBuffer + 100 {
+		for i := range 5000 {
 			fmt.Fprintf(respW, "%%output %%0 line-%d\\012\n", i)
 		}
 		respW.Close()
 	}()
 
-	// Wait for readLoop to finish (it should not deadlock)
-	<-ctrl.done
-}
-
-func TestControllerClosedOutputChan(t *testing.T) {
-	_, cmdW := io.Pipe()
-	respR, respW := io.Pipe()
-
 	ctrl := NewController(respR, cmdW)
+	defer cmdW.Close()
 
-	// Close the reader side to make readLoop exit
-	respW.Close()
-
-	// Wait for readLoop to finish
 	<-ctrl.done
-
-	// OutputChan should be closed; reading should get zero value + !ok
-	select {
-	case _, ok := <-ctrl.OutputChan():
-		if ok {
-			t.Error("expected channel to be closed")
-		}
-	case <-time.After(time.Second):
-		t.Error("timeout: OutputChan should be closed after readLoop exits")
-	}
-
-	cmdW.Close()
 }
 
 func TestControllerMultilineData(t *testing.T) {
@@ -481,6 +379,109 @@ func TestControllerWaitStartup(t *testing.T) {
 	if err := ctrl.WaitStartup(ctx); err != nil {
 		t.Fatalf("WaitStartup: %v", err)
 	}
+}
+
+func TestControllerDetach(t *testing.T) {
+	var written strings.Builder
+	ctrl := &RealController{
+		w:    &written,
+		done: make(chan struct{}),
+	}
+
+	if err := ctrl.Detach(); err != nil {
+		t.Fatalf("Detach: %v", err)
+	}
+	if !strings.Contains(written.String(), "detach-client") {
+		t.Errorf("Detach should write 'detach-client', got %q", written.String())
+	}
+}
+
+func TestControllerWaitStartupContextCancelled(t *testing.T) {
+	_, cmdW := io.Pipe()
+	respR, _ := io.Pipe()
+
+	ctrl := NewController(respR, cmdW)
+	defer func() {
+		cmdW.Close()
+		respR.Close()
+		ctrl.Close()
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	err := ctrl.WaitStartup(ctx)
+	if err != context.Canceled {
+		t.Errorf("WaitStartup err = %v, want context.Canceled", err)
+	}
+}
+
+func TestControllerWaitStartupControllerClosed(t *testing.T) {
+	_, cmdW := io.Pipe()
+	respR, respW := io.Pipe()
+
+	ctrl := NewController(respR, cmdW)
+
+	// Close the writer to make readLoop exit (which closes done)
+	respW.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err := ctrl.WaitStartup(ctx)
+	if err == nil {
+		t.Error("WaitStartup should fail when controller closes during startup")
+	}
+	if !strings.Contains(err.Error(), "controller closed") {
+		t.Errorf("error = %q, want to contain 'controller closed'", err.Error())
+	}
+
+	cmdW.Close()
+}
+
+func TestControllerAlive(t *testing.T) {
+	_, cmdW := io.Pipe()
+	respR, respW := io.Pipe()
+
+	ctrl := NewController(respR, cmdW)
+
+	if !ctrl.Alive() {
+		t.Error("Alive should return true while readLoop is running")
+	}
+
+	respW.Close()
+	<-ctrl.done
+
+	if ctrl.Alive() {
+		t.Error("Alive should return false after readLoop exits")
+	}
+
+	cmdW.Close()
+}
+
+func TestControllerSendCommandWriteError(t *testing.T) {
+	cmdR, cmdW := io.Pipe()
+	respR, _ := io.Pipe()
+
+	go func() {
+		io.Copy(io.Discard, cmdR)
+	}()
+
+	ctrl := NewController(respR, cmdW)
+
+	// Close the write pipe to force a write error
+	cmdW.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_, err := ctrl.SendCommand(ctx, "test")
+	if err == nil {
+		t.Error("expected error after writer closed")
+	}
+
+	cmdR.Close()
+	respR.Close()
 }
 
 func TestControllerWaitStartupThenCommand(t *testing.T) {

@@ -41,7 +41,7 @@ type RealDialer struct {
 }
 
 func (d *RealDialer) Dial(ctx context.Context, host, user string) (Client, error) {
-	vlog.Printf("ssh: dialing host=%q user=%q", host, user)
+	vlog.Logf(ctx, "ssh: dialing host=%q user=%q", host, user)
 	return &execClient{
 		host:           host,
 		user:           user,

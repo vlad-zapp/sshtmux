@@ -145,6 +145,8 @@ func runDaemon(args []string) {
 			PreCommand:     hs.PreCommand,
 			InitCommands:   hs.InitCommands,
 			TmuxSocketPath: cfg.TmuxSocketPath,
+			Term:           hs.Term,
+			HistoryLimit:   hs.HistoryLimit,
 		})
 	}
 

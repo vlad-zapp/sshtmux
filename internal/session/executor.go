@@ -23,11 +23,13 @@ type ExecResult struct {
 type Executor struct {
 	ctrl    tmux.Controller
 	counter atomic.Int64
+	sem     chan struct{} // size 1, serializes Exec/RunInit on this session
 }
 
 // NewExecutor creates a new executor using the given tmux controller.
 func NewExecutor(ctrl tmux.Controller) *Executor {
-	return &Executor{ctrl: ctrl}
+	e := &Executor{ctrl: ctrl, sem: make(chan struct{}, 1)}
+	return e
 }
 
 // Exec executes a command in the tmux pane and returns the output + exit code.
@@ -45,13 +47,20 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 		defer cancel()
 	}
 
+	select {
+	case e.sem <- struct{}{}:
+		defer func() { <-e.sem }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
 	paneID := e.ctrl.PaneID()
 	if paneID == "" {
 		return nil, fmt.Errorf("pane ID not set")
 	}
 
 	channel := fmt.Sprintf("__sshtmux_wf_%d", e.counter.Add(1))
-	vlog.Printf("exec: running command=%q channel=%s pane=%s", command, channel, paneID)
+	vlog.Logf(ctx, "exec: running command=%q channel=%s pane=%s", command, channel, paneID)
 
 	// Step 1: Clear scrollback so capture-pane returns only this command's output.
 	// This prevents unbounded scrollback growth and simplifies output extraction.
@@ -70,7 +79,7 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 		return nil, fmt.Errorf("send-keys: %w", err)
 	}
 
-	vlog.Printf("exec: send-keys done, waiting for completion")
+	vlog.Logf(ctx, "exec: send-keys done, waiting for completion")
 	// Step 3: Block until shell signals via wait-for
 	waitCmd := fmt.Sprintf("wait-for %s", channel)
 	if _, err := e.ctrl.SendCommand(ctx, waitCmd); err != nil {
@@ -105,7 +114,7 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 	// Post-process output: strip echo, prompt, ANSI codes
 	output := postProcessOutput(captureResult.Data, channel)
 
-	vlog.Printf("exec: done exit_code=%d output_len=%d", exitCode, len(output))
+	vlog.Logf(ctx, "exec: done exit_code=%d output_len=%d", exitCode, len(output))
 	return &ExecResult{
 		Output:   output,
 		ExitCode: exitCode,
@@ -115,6 +124,13 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 // RunInit executes an init command using the wait-for pattern.
 // No output capture is needed for init commands.
 func (e *Executor) RunInit(ctx context.Context, command string) error {
+	select {
+	case e.sem <- struct{}{}:
+		defer func() { <-e.sem }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
 	paneID := e.ctrl.PaneID()
 	if paneID == "" {
 		return fmt.Errorf("pane ID not set")
@@ -136,27 +152,21 @@ func (e *Executor) RunInit(ctx context.Context, command string) error {
 	return nil
 }
 
-// ansiRegex matches ANSI escape sequences.
-var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\[\?[0-9;]*[a-zA-Z]`)
+// ansiRegex matches ANSI escape sequences:
+// - CSI sequences: \x1b[...X (where X is a letter)
+// - CSI with ? prefix: \x1b[?...X (bracketed paste mode, etc.)
+// - OSC sequences: \x1b]...BEL
+// - Character set selection: \x1b(X, \x1b)X
+var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-B]|\x1b\[\?[0-9;]*[hlm]`)
 
-// stripANSI removes ANSI escape sequences from a string.
-func stripANSI(s string) string {
+// StripANSI removes ANSI escape sequences from a string.
+func StripANSI(s string) string {
 	return ansiRegex.ReplaceAllString(s, "")
 }
 
-// isPrompt returns true if the line looks like a standard shell prompt.
-func isPrompt(line string) bool {
-	return line == "$ " || line == "# " ||
-		strings.HasSuffix(line, "$ ") || strings.HasSuffix(line, "# ")
-}
-
-// postProcessOutput strips the leading command echo, trailing prompt, and ANSI codes.
+// postProcessOutput strips the leading command echo and trailing blank lines.
 // The channel parameter is the unique wait-for channel name used to identify the echo boundary.
-// Works with both %output notification data and capture-pane output.
 func postProcessOutput(raw, channel string) string {
-	// Strip ANSI escape sequences first
-	raw = stripANSI(raw)
-
 	// Normalize line endings: strip \r (terminal outputs \r\n)
 	raw = strings.ReplaceAll(raw, "\r", "")
 
@@ -176,28 +186,8 @@ func postProcessOutput(raw, channel string) string {
 		}
 	}
 
-	// Trim trailing blank lines before prompt detection.
+	// Trim trailing blank lines.
 	// capture-pane may include empty rows from the pane area below the cursor.
-	raw = strings.TrimRight(raw, "\n")
-
-	// Strip trailing prompt if the last line matches a known prompt pattern.
-	// This preserves output from commands like `printf 'hello'` that don't
-	// end with a newline.
-	if len(raw) > 0 {
-		if idx := strings.LastIndex(raw, "\n"); idx >= 0 {
-			lastLine := raw[idx+1:]
-			if isPrompt(lastLine) {
-				raw = raw[:idx]
-			}
-		} else {
-			// Entire output is a single partial line
-			if isPrompt(raw) {
-				raw = ""
-			}
-		}
-	}
-
-	// Final cleanup
 	raw = strings.TrimRight(raw, "\n")
 
 	return raw
