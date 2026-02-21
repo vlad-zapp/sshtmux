@@ -54,16 +54,6 @@ func New(ctx context.Context, dialer sshclient.Dialer, host, user string, opts O
 		return nil, fmt.Errorf("start tmux: %w", err)
 	}
 
-	vlog.Logf(ctx, "session: tmux started, running %d init commands", len(opts.InitCommands))
-	// Run init commands
-	for _, cmd := range opts.InitCommands {
-		vlog.Logf(ctx, "session: init command: %q", cmd)
-		if err := s.executor.RunInit(ctx, cmd); err != nil {
-			s.Close()
-			return nil, fmt.Errorf("init command %q: %w", cmd, err)
-		}
-	}
-
 	return s, nil
 }
 
@@ -181,28 +171,28 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 	}
 	ctrl.SendCommand(ctx, fmt.Sprintf("set-option -p history-limit %d", historyLimit))
 
-	// Disable history first to prevent subsequent commands from being recorded.
-	// Set PS1='' (empty prompt) to eliminate prompt artifacts in output.
-	// Set TERM to minimize ANSI escape sequences at the source.
+	// Combine all init commands into a single shell line sent as one send-keys.
+	// Sending multiple sequential send-keys can fail because the shell's line
+	// editor may flush the pty input buffer between commands, losing keystrokes.
+	// A single combined line avoids this entirely.
 	term := opts.Term
 	if term == "" {
 		term = "dumb"
 	}
-	initSetup := []struct {
-		cmd   string
-		fatal bool
-	}{
-		{"unset HISTFILE", false},
-		{"set +o history", false},
-		{"export PS1=''", true},
-		{fmt.Sprintf("export TERM=%s", term), true},
-	}
-	for _, init := range initSetup {
-		if err := s.executor.RunInit(ctx, init.cmd); err != nil {
-			if init.fatal {
-				return fmt.Errorf("init %q: %w", init.cmd, err)
-			}
-		}
+	var initParts []string
+	// User init commands first (from config)
+	initParts = append(initParts, opts.InitCommands...)
+	// Internal setup
+	initParts = append(initParts,
+		"unset HISTFILE 2>/dev/null",
+		"set +o history 2>/dev/null",
+		"export PS1=''",
+		fmt.Sprintf("export TERM=%s", term),
+	)
+	initLine := strings.Join(initParts, "; ")
+	vlog.Logf(ctx, "session: running init: %s", initLine)
+	if err := s.executor.RunInit(ctx, initLine); err != nil {
+		return fmt.Errorf("init: %w", err)
 	}
 
 	return nil
