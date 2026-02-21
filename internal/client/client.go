@@ -49,6 +49,12 @@ func (c *Client) Send(req daemon.Request) (*daemon.Response, error) {
 	if err := daemon.ReadMessage(conn, &resp); err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
+
+	// Print daemon logs to stderr when verbose
+	if resp.Logs != "" {
+		fmt.Fprint(os.Stderr, resp.Logs)
+	}
+
 	return &resp, nil
 }
 

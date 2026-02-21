@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -195,43 +196,47 @@ func TestDaemonConcurrentClients(t *testing.T) {
 	}
 }
 
-func TestDaemonVerbosePerRequest(t *testing.T) {
+func TestDaemonVerboseReturnsLogs(t *testing.T) {
 	d, sockPath := startTestDaemon(t)
 	defer d.Stop()
+	defer vlog.SetEnabled(false)
 
-	// Ensure verbose is off initially
-	vlog.SetEnabled(false)
-
-	// Send a non-verbose request
-	sendRequest(t, sockPath, Request{
+	// Non-verbose request should have no logs
+	resp := sendRequest(t, sockPath, Request{
 		Type:    "exec",
 		Host:    "host1",
 		User:    "user1",
 		Command: "ls",
 		Verbose: false,
 	})
+	if resp.Logs != "" {
+		t.Errorf("non-verbose request should have no logs, got %q", resp.Logs)
+	}
 
-	// Send a verbose request — the daemon should enable vlog for this request
-	sendRequest(t, sockPath, Request{
+	// Verbose request should return logs
+	resp = sendRequest(t, sockPath, Request{
 		Type:    "exec",
 		Host:    "host1",
 		User:    "user1",
 		Command: "ls",
 		Verbose: true,
 	})
+	if resp.Logs == "" {
+		t.Error("verbose request should return daemon logs")
+	}
+	if !strings.Contains(resp.Logs, "daemon: dispatch") {
+		t.Errorf("logs should contain dispatch message, got %q", resp.Logs)
+	}
 
-	// Send another non-verbose request — verbose should be turned off
-	sendRequest(t, sockPath, Request{
+	// Another non-verbose request should again have no logs
+	resp = sendRequest(t, sockPath, Request{
 		Type:    "exec",
 		Host:    "host1",
 		User:    "user1",
 		Command: "ls",
 		Verbose: false,
 	})
-
-	// Verify the Verbose field is correctly serialized in the request
-	// (the dispatch handler sets vlog per-request, which is the key behavior)
-
-	// Clean up: restore original state
-	vlog.SetEnabled(false)
+	if resp.Logs != "" {
+		t.Errorf("non-verbose request after verbose should have no logs, got %q", resp.Logs)
+	}
 }

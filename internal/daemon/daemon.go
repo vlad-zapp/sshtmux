@@ -111,23 +111,34 @@ func (d *Daemon) handleConn(conn net.Conn) {
 
 func (d *Daemon) dispatch(req Request) Response {
 	vlog.SetEnabled(req.Verbose)
+	if req.Verbose {
+		vlog.StartCapture()
+	}
+
 	vlog.Printf("daemon: dispatch type=%s host=%q user=%q command=%q", req.Type, req.Host, req.User, req.Command)
+
+	var resp Response
 	switch req.Type {
 	case "exec":
-		return d.handleExec(req)
+		resp = d.handleExec(req)
 	case "disconnect":
-		return d.handleDisconnect(req)
+		resp = d.handleDisconnect(req)
 	case "status":
-		return d.handleStatus()
+		resp = d.handleStatus()
 	case "shutdown":
 		go func() {
 			time.Sleep(shutdownGracePeriod)
 			d.Stop()
 		}()
-		return Response{Success: true, Output: "shutting down"}
+		resp = Response{Success: true, Output: "shutting down"}
 	default:
-		return Response{Error: fmt.Sprintf("unknown request type: %s", req.Type)}
+		resp = Response{Error: fmt.Sprintf("unknown request type: %s", req.Type)}
 	}
+
+	if req.Verbose {
+		resp.Logs = vlog.StopCapture()
+	}
+	return resp
 }
 
 func (d *Daemon) handleExec(req Request) Response {

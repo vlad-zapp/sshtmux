@@ -22,6 +22,7 @@ type Response struct {
 	Output   string `json:"output"`
 	ExitCode int    `json:"exit_code"`
 	Error    string `json:"error"`
+	Logs     string `json:"logs,omitempty"`
 }
 
 const maxMessageSize = 10 * 1024 * 1024 // 10 MB
