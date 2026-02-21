@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -104,44 +103,52 @@ func (d *Daemon) handleConn(conn net.Conn) {
 		return
 	}
 
-	resp := d.dispatch(req)
+	resp := d.dispatch(conn, req)
 	if err := WriteMessage(conn, &resp); err != nil {
 		log.Printf("write response: %v", err)
 	}
 }
 
-func (d *Daemon) dispatch(req Request) Response {
+// logStreamer writes log lines to the client as streaming Response messages.
+type logStreamer struct {
+	mu   sync.Mutex
+	conn net.Conn
+}
+
+func (s *logStreamer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	msg := Response{Streaming: true, Logs: string(p)}
+	if err := WriteMessage(s.conn, &msg); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (d *Daemon) dispatch(conn net.Conn, req Request) Response {
 	ctx := context.Background()
-	var logBuf *bytes.Buffer
 	if req.Verbose {
-		logBuf = &bytes.Buffer{}
-		ctx = vlog.WithWriter(ctx, logBuf)
+		ctx = vlog.WithWriter(ctx, &logStreamer{conn: conn})
 	}
 
 	vlog.Logf(ctx, "daemon: dispatch type=%s host=%q user=%q command=%q", req.Type, req.Host, req.User, req.Command)
 
-	var resp Response
 	switch req.Type {
 	case "exec":
-		resp = d.handleExec(ctx, req)
+		return d.handleExec(ctx, req)
 	case "disconnect":
-		resp = d.handleDisconnect(req)
+		return d.handleDisconnect(req)
 	case "status":
-		resp = d.handleStatus()
+		return d.handleStatus()
 	case "shutdown":
 		go func() {
 			time.Sleep(shutdownGracePeriod)
 			d.Stop()
 		}()
-		resp = Response{Success: true, Output: "shutting down"}
+		return Response{Success: true, Output: "shutting down"}
 	default:
-		resp = Response{Error: fmt.Sprintf("unknown request type: %s", req.Type)}
+		return Response{Error: fmt.Sprintf("unknown request type: %s", req.Type)}
 	}
-
-	if logBuf != nil {
-		resp.Logs = logBuf.String()
-	}
-	return resp
 }
 
 func (d *Daemon) handleExec(ctx context.Context, req Request) Response {

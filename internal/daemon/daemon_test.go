@@ -43,11 +43,23 @@ func sendRequest(t *testing.T, sockPath string, req Request) Response {
 		t.Fatalf("WriteMessage: %v", err)
 	}
 
-	var resp Response
-	if err := ReadMessage(conn, &resp); err != nil {
-		t.Fatalf("ReadMessage: %v", err)
+	// Read messages, collecting streamed logs until the final response.
+	var allLogs strings.Builder
+	for {
+		var resp Response
+		if err := ReadMessage(conn, &resp); err != nil {
+			t.Fatalf("ReadMessage: %v", err)
+		}
+		if resp.Streaming {
+			allLogs.WriteString(resp.Logs)
+			continue
+		}
+		// Final response — attach collected streamed logs
+		if allLogs.Len() > 0 && resp.Logs == "" {
+			resp.Logs = allLogs.String()
+		}
+		return resp
 	}
-	return resp
 }
 
 func TestDaemonExec(t *testing.T) {
@@ -225,16 +237,23 @@ func TestDaemonConcurrentVerboseRequests(t *testing.T) {
 				errs <- err
 				return
 			}
-			var resp Response
-			if err := ReadMessage(conn, &resp); err != nil {
-				errs <- err
+			// Read all messages (streaming logs + final response)
+			for {
+				var resp Response
+				if err := ReadMessage(conn, &resp); err != nil {
+					errs <- err
+					return
+				}
+				if resp.Streaming {
+					continue // consume log messages
+				}
+				if resp.Error != "" {
+					errs <- fmt.Errorf("response error: %s", resp.Error)
+					return
+				}
+				errs <- nil
 				return
 			}
-			if resp.Error != "" {
-				errs <- fmt.Errorf("response error: %s", resp.Error)
-				return
-			}
-			errs <- nil
 		}(i)
 	}
 

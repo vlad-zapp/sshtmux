@@ -17,12 +17,15 @@ type Request struct {
 }
 
 // Response represents a daemon-to-CLI response.
+// When Streaming is true, it's an intermediate log message (Logs field only).
+// When Streaming is false, it's the final response.
 type Response struct {
-	Success  bool   `json:"success"`
-	Output   string `json:"output"`
-	ExitCode int    `json:"exit_code"`
-	Error    string `json:"error"`
-	Logs     string `json:"logs,omitempty"`
+	Streaming bool   `json:"streaming,omitempty"`
+	Success   bool   `json:"success"`
+	Output    string `json:"output"`
+	ExitCode  int    `json:"exit_code"`
+	Error     string `json:"error"`
+	Logs      string `json:"logs,omitempty"`
 }
 
 const maxMessageSize = 10 * 1024 * 1024 // 10 MB

@@ -136,6 +136,10 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 	}, nil
 }
 
+// initTimeout is the per-command timeout for init commands.
+// Keeps individual init commands from consuming the entire request timeout.
+const initTimeout = 10 * time.Second
+
 // RunInit executes an init command using the wait-for pattern.
 // No output capture is needed for init commands.
 func (e *Executor) RunInit(ctx context.Context, command string) error {
@@ -159,13 +163,35 @@ func (e *Executor) RunInit(ctx context.Context, command string) error {
 	sendCmd := tmux.FormatSendKeys(paneID, shellLine)
 	waitCmd := fmt.Sprintf("wait-for %s", channel)
 
+	// Use a per-command timeout so a single hung init doesn't consume
+	// the entire request timeout.
+	initCtx, cancel := context.WithTimeout(ctx, initTimeout)
+	defer cancel()
+
 	vlog.Logf(ctx, "init: sending pipeline (send-keys + wait-for)")
-	if _, err := e.ctrl.SendCommandPipeline(ctx, []string{sendCmd, waitCmd}); err != nil {
+	if _, err := e.ctrl.SendCommandPipeline(initCtx, []string{sendCmd, waitCmd}); err != nil {
+		// On timeout, capture pane content for diagnostics
+		e.captureInitDiagnostics(ctx, paneID, command)
 		return fmt.Errorf("send-keys+wait-for init: %w", err)
 	}
 
 	vlog.Logf(ctx, "init: %q done", command)
 	return nil
+}
+
+// captureInitDiagnostics captures the pane content after an init command fails,
+// helping diagnose why the shell didn't execute the wait-for signal.
+func (e *Executor) captureInitDiagnostics(ctx context.Context, paneID, command string) {
+	diagCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	captureCmd := fmt.Sprintf("capture-pane -p -J -S - -t %s", paneID)
+	result, err := e.ctrl.SendCommand(diagCtx, captureCmd)
+	if err != nil {
+		vlog.Logf(ctx, "init: FAILED %q (could not capture pane: %v)", command, err)
+		return
+	}
+	vlog.Logf(ctx, "init: FAILED %q — pane content:\n%s", command, result.Data)
 }
 
 // ansiRegex matches ANSI escape sequences:

@@ -45,17 +45,25 @@ func (c *Client) Send(req daemon.Request) (*daemon.Response, error) {
 		return nil, fmt.Errorf("send request: %w", err)
 	}
 
-	var resp daemon.Response
-	if err := daemon.ReadMessage(conn, &resp); err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
+	// Read messages until we get the final (non-streaming) response.
+	// Streaming messages contain log lines that are printed immediately.
+	for {
+		var resp daemon.Response
+		if err := daemon.ReadMessage(conn, &resp); err != nil {
+			return nil, fmt.Errorf("read response: %w", err)
+		}
 
-	// Print daemon logs to stderr when verbose
-	if resp.Logs != "" {
-		fmt.Fprint(os.Stderr, resp.Logs)
-	}
+		if resp.Streaming {
+			fmt.Fprint(os.Stderr, resp.Logs)
+			continue
+		}
 
-	return &resp, nil
+		// Final response — print any remaining logs
+		if resp.Logs != "" {
+			fmt.Fprint(os.Stderr, resp.Logs)
+		}
+		return &resp, nil
+	}
 }
 
 // Exec is a convenience method for executing a command.
