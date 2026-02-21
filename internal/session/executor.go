@@ -78,10 +78,12 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 
 	// Step 1: Clear scrollback so capture-pane returns only this command's output.
 	// This prevents unbounded scrollback growth and simplifies output extraction.
+	vlog.Logf(ctx, "exec: step 1: clear-history")
 	clearCmd := fmt.Sprintf("clear-history -t %s", paneID)
 	if _, err := e.ctrl.SendCommand(ctx, clearCmd); err != nil {
 		return nil, fmt.Errorf("clear-history: %w", err)
 	}
+	vlog.Logf(ctx, "exec: step 1: clear-history done")
 
 	// Step 2+3: Send command and wait-for in a single pipeline write.
 	// This eliminates the SSH round-trip gap between send-keys and wait-for,
@@ -94,23 +96,27 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 	sendCmd := tmux.FormatSendKeys(paneID, shellLine)
 	waitCmd := fmt.Sprintf("wait-for %s", channel)
 
-	vlog.Logf(ctx, "exec: sending send-keys + wait-for pipeline")
+	vlog.Logf(ctx, "exec: step 2: send-keys + wait-for pipeline")
 	results, err := e.ctrl.SendCommandPipeline(ctx, []string{sendCmd, waitCmd})
 	if err != nil {
 		return nil, fmt.Errorf("send-keys+wait-for pipeline: %w", err)
 	}
 	_ = results // send-keys and wait-for responses are empty on success
+	vlog.Logf(ctx, "exec: step 2: pipeline done")
 
-	// Step 4: Capture pane content. The command has finished, so all output
+	// Step 3: Capture pane content. The command has finished, so all output
 	// is in the pane buffer. -p prints to stdout (returned via %begin/%end),
 	// -J joins wrapped lines, -S - starts from beginning of scrollback.
+	vlog.Logf(ctx, "exec: step 3: capture-pane")
 	captureCmd := fmt.Sprintf("capture-pane -p -J -S - -t %s", paneID)
 	captureResult, err := e.ctrl.SendCommand(ctx, captureCmd)
 	if err != nil {
 		return nil, fmt.Errorf("capture-pane: %w", err)
 	}
+	vlog.Logf(ctx, "exec: step 3: capture-pane done, len=%d", len(captureResult.Data))
 
-	// Step 5: Read exit code from pane option
+	// Step 4: Read exit code from pane option
+	vlog.Logf(ctx, "exec: step 4: display-message (exit code)")
 	displayCmd := fmt.Sprintf("display-message -p -t %s '#{@sshtmux-rv}'", paneID)
 	result, err := e.ctrl.SendCommand(ctx, displayCmd)
 	if err != nil {

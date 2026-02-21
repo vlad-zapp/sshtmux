@@ -57,6 +57,9 @@ type RealController struct {
 	done   chan struct{}
 	closed sync.Once
 	err    error // reader goroutine error
+
+	// Optional diagnostic logger set via SetLogFunc.
+	logFunc func(format string, args ...any)
 }
 
 type commandResponse struct {
@@ -75,6 +78,18 @@ func NewController(r io.Reader, w io.Writer) *RealController {
 	}
 	go c.readLoop(r)
 	return c
+}
+
+// SetLogFunc sets an optional diagnostic logger for the controller's read loop.
+// Must be called before WaitStartup for complete coverage.
+func (c *RealController) SetLogFunc(f func(format string, args ...any)) {
+	c.logFunc = f
+}
+
+func (c *RealController) log(format string, args ...any) {
+	if f := c.logFunc; f != nil {
+		f(format, args...)
+	}
 }
 
 // WaitStartup blocks until the initial tmux %begin/%end handshake is consumed.
@@ -97,6 +112,7 @@ func (c *RealController) readLoop(r io.Reader) {
 
 	var currentData []string
 	inResponse := false
+	outputCount := 0
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -105,30 +121,40 @@ func (c *RealController) readLoop(r io.Reader) {
 			// Data line (between %begin and %end)
 			if inResponse {
 				currentData = append(currentData, line)
+			} else if strings.HasPrefix(line, "%") {
+				c.log("readloop: unknown notification: %q", line)
 			}
 			continue
 		}
 
 		switch msg.Type {
 		case MsgBegin:
+			if outputCount > 0 {
+				c.log("readloop: %d %%output notifications since last command", outputCount)
+				outputCount = 0
+			}
+			c.log("readloop: %%begin cmd=%d", msg.CmdNum)
 			currentData = nil
 			inResponse = true
 
 		case MsgEnd:
 			inResponse = false
 			data := strings.Join(currentData, "\n")
+			c.log("readloop: %%end cmd=%d data_len=%d", msg.CmdNum, len(data))
 			c.deliverResponse(&CommandResult{Data: data})
 
 		case MsgError:
 			inResponse = false
 			errMsg := strings.Join(currentData, "\n")
+			c.log("readloop: %%error cmd=%d err=%q", msg.CmdNum, errMsg)
 			c.deliverResponse(&CommandResult{Error: errMsg})
 
 		case MsgOutput:
-			// %output notifications are ignored; output is retrieved via capture-pane.
+			outputCount++
 		}
 	}
 
+	c.log("readloop: scanner exited err=%v", scanner.Err())
 	c.err = scanner.Err()
 
 	// Signal all pending commands that the reader is done.
@@ -138,11 +164,13 @@ func (c *RealController) readLoop(r io.Reader) {
 		errMsg = fmt.Sprintf("controller closed: %v", c.err)
 	}
 	c.queueMu.Lock()
+	pending := len(c.queue)
 	for _, ch := range c.queue {
 		ch <- commandResponse{err: fmt.Errorf("%s", errMsg)}
 	}
 	c.queue = nil
 	c.queueMu.Unlock()
+	c.log("readloop: cleaned up %d pending waiters", pending)
 }
 
 // deliverResponse sends a result to the first pending waiter, or signals startup.
@@ -151,13 +179,16 @@ func (c *RealController) deliverResponse(result *CommandResult) {
 	if len(c.queue) > 0 {
 		ch := c.queue[0]
 		c.queue = c.queue[1:]
+		remaining := len(c.queue)
 		c.queueMu.Unlock()
+		c.log("readloop: delivered to waiter (remaining=%d)", remaining)
 		ch <- commandResponse{result: result}
 		return
 	}
 	c.queueMu.Unlock()
 
 	// No pending command — this is the initial startup response
+	c.log("readloop: no waiter in queue, signaling startup")
 	c.startupOnce.Do(func() {
 		close(c.startup)
 	})
@@ -171,8 +202,10 @@ func (c *RealController) SendCommand(ctx context.Context, cmd string) (*CommandR
 	// Push to queue while holding mu, so send order == queue order
 	c.queueMu.Lock()
 	c.queue = append(c.queue, ch)
+	qLen := len(c.queue)
 	c.queueMu.Unlock()
 
+	c.log("SendCommand: writing %q queue_len=%d", cmd, qLen)
 	_, err := fmt.Fprintf(c.w, "%s\n", cmd)
 	c.mu.Unlock()
 
@@ -186,6 +219,7 @@ func (c *RealController) SendCommand(ctx context.Context, cmd string) (*CommandR
 			}
 		}
 		c.queueMu.Unlock()
+		c.log("SendCommand: write error: %v", err)
 		return nil, fmt.Errorf("write command: %w", err)
 	}
 
@@ -193,13 +227,17 @@ func (c *RealController) SendCommand(ctx context.Context, cmd string) (*CommandR
 	case <-ctx.Done():
 		// Remove from queue on cancellation
 		c.queueMu.Lock()
+		found := false
 		for i, qch := range c.queue {
 			if qch == ch {
 				c.queue = append(c.queue[:i], c.queue[i+1:]...)
+				found = true
 				break
 			}
 		}
+		qLen := len(c.queue)
 		c.queueMu.Unlock()
+		c.log("SendCommand: context cancelled for %q (found_in_queue=%v queue_len=%d)", cmd, found, qLen)
 		return nil, ctx.Err()
 	case resp := <-ch:
 		return resp.result, resp.err
