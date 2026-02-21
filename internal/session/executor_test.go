@@ -117,7 +117,7 @@ func TestExecBasic(t *testing.T) {
 	mc.responses["capture-pane"] = "ls -la; __rv=$?; tmux set-option -p @sshtmux-rv \"$__rv\"; tmux wait-for -S __sshtmux_wf_1\nfile1.txt\nfile2.txt"
 	mc.responses["display-message"] = "0"
 
-	exec := NewExecutor(mc)
+	exec := NewExecutor(mc, "")
 
 	ctx := context.Background()
 	result, err := exec.Exec(ctx, "ls -la", 5*time.Second)
@@ -158,7 +158,7 @@ func TestExecNonZeroExitCode(t *testing.T) {
 	mc.responses["capture-pane"] = "cmd; __rv=$?; tmux set-option -p @sshtmux-rv \"$__rv\"; tmux wait-for -S __sshtmux_wf_1\nbash: cmd: command not found"
 	mc.responses["display-message"] = "127"
 
-	exec := NewExecutor(mc)
+	exec := NewExecutor(mc, "")
 
 	ctx := context.Background()
 	result, err := exec.Exec(ctx, "cmd", 5*time.Second)
@@ -175,7 +175,7 @@ func TestExecExitCodeParseError(t *testing.T) {
 	mc.responses["capture-pane"] = "output"
 	mc.responses["display-message"] = "notanumber"
 
-	exec := NewExecutor(mc)
+	exec := NewExecutor(mc, "")
 
 	ctx := context.Background()
 	_, err := exec.Exec(ctx, "cmd", 5*time.Second)
@@ -189,7 +189,7 @@ func TestExecExitCodeParseError(t *testing.T) {
 
 func TestExecNoPaneID(t *testing.T) {
 	mc := newMockController("")
-	exec := NewExecutor(mc)
+	exec := NewExecutor(mc, "")
 
 	ctx := context.Background()
 	_, err := exec.Exec(ctx, "ls", time.Second)
@@ -202,7 +202,7 @@ func TestExecContextTimeout(t *testing.T) {
 	mc := newMockController("%0")
 	mc.blockPrefixes = []string{"wait-for"} // wait-for blocks until context done
 
-	exec := NewExecutor(mc)
+	exec := NewExecutor(mc, "")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -215,7 +215,7 @@ func TestExecContextTimeout(t *testing.T) {
 
 func TestRunInit(t *testing.T) {
 	mc := newMockController("%0")
-	exec := NewExecutor(mc)
+	exec := NewExecutor(mc, "")
 
 	ctx := context.Background()
 	if err := exec.RunInit(ctx, "sudo -i"); err != nil {
@@ -236,7 +236,7 @@ func TestRunInit(t *testing.T) {
 
 func TestRunInitNoPaneID(t *testing.T) {
 	mc := newMockController("")
-	exec := NewExecutor(mc)
+	exec := NewExecutor(mc, "")
 
 	ctx := context.Background()
 	err := exec.RunInit(ctx, "sudo -i")
@@ -339,7 +339,7 @@ func TestExecLargeOutput(t *testing.T) {
 	mc.responses["capture-pane"] = strings.Join(lines, "\n")
 	mc.responses["display-message"] = "0"
 
-	exec := NewExecutor(mc)
+	exec := NewExecutor(mc, "")
 
 	ctx := context.Background()
 	result, err := exec.Exec(ctx, "cmd", 5*time.Second)
@@ -362,7 +362,7 @@ func TestExecMultipleCommands(t *testing.T) {
 	mc := newMockController("%0")
 	mc.responses["display-message"] = "0"
 
-	exec := NewExecutor(mc)
+	exec := NewExecutor(mc, "")
 
 	for i := range 3 {
 		// Set capture-pane response for this command
@@ -392,7 +392,7 @@ func TestExecCapturePaneContainsDollarSign(t *testing.T) {
 	mc.responses["capture-pane"] = "cmd; __rv=$?; tmux set-option -p @sshtmux-rv \"$__rv\"; tmux wait-for -S __sshtmux_wf_1\nprice is 100$ per unit\ntotal: 200$ "
 	mc.responses["display-message"] = "0"
 
-	exec := NewExecutor(mc)
+	exec := NewExecutor(mc, "")
 
 	ctx := context.Background()
 	result, err := exec.Exec(ctx, "cmd", 5*time.Second)
@@ -412,7 +412,7 @@ func TestExecClearHistoryCalledBeforeEachCommand(t *testing.T) {
 	mc.responses["capture-pane"] = "cmd; tmux wait-for -S __sshtmux_wf_1\noutput"
 	mc.responses["display-message"] = "0"
 
-	exec := NewExecutor(mc)
+	exec := NewExecutor(mc, "")
 
 	for range 3 {
 		ctx := context.Background()
@@ -501,7 +501,7 @@ func TestExecSendKeysContainsWaitFor(t *testing.T) {
 	mc.responses["capture-pane"] = "cmd; tmux wait-for -S __sshtmux_wf_1\noutput"
 	mc.responses["display-message"] = "0"
 
-	exec := NewExecutor(mc)
+	exec := NewExecutor(mc, "")
 	_, err := exec.Exec(context.Background(), "echo hello", 5*time.Second)
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
@@ -527,7 +527,7 @@ func TestExecEmptyDisplayMessage(t *testing.T) {
 	mc.responses["capture-pane"] = "cmd; tmux wait-for -S __sshtmux_wf_1\n"
 	mc.responses["display-message"] = ""
 
-	exec := NewExecutor(mc)
+	exec := NewExecutor(mc, "")
 	result, err := exec.Exec(context.Background(), "true", 5*time.Second)
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
@@ -541,7 +541,7 @@ func TestExecClearHistoryError(t *testing.T) {
 	mc := newMockController("%0")
 	mc.blockPrefixes = []string{"clear-history"} // blocks on clear-history
 
-	exec := NewExecutor(mc)
+	exec := NewExecutor(mc, "")
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
@@ -558,7 +558,7 @@ func TestExecConcurrentSameSession(t *testing.T) {
 	mc := newMockController("%0")
 	mc.responses["display-message"] = "0"
 
-	exec := NewExecutor(mc)
+	exec := NewExecutor(mc, "")
 
 	const numWorkers = 5
 	var wg sync.WaitGroup
@@ -627,7 +627,7 @@ func TestExecConcurrentSemaphoreTimeout(t *testing.T) {
 	mc.responses["capture-pane"] = "cmd; tmux wait-for -S __sshtmux_wf_1\noutput"
 	mc.blockPrefixes = []string{"wait-for"} // blocks until context done
 
-	exec := NewExecutor(mc)
+	exec := NewExecutor(mc, "")
 
 	// First goroutine takes the semaphore and blocks on wait-for
 	go func() {
@@ -649,7 +649,7 @@ func TestExecConcurrentSemaphoreTimeout(t *testing.T) {
 
 func TestRunInitSendKeysFormat(t *testing.T) {
 	mc := newMockController("%0")
-	exec := NewExecutor(mc)
+	exec := NewExecutor(mc, "")
 
 	if err := exec.RunInit(context.Background(), "export FOO=bar"); err != nil {
 		t.Fatalf("RunInit: %v", err)
@@ -673,7 +673,7 @@ func TestExecUsesPipeline(t *testing.T) {
 	mc.responses["capture-pane"] = "cmd; tmux wait-for -S __sshtmux_wf_1\noutput"
 	mc.responses["display-message"] = "0"
 
-	exec := NewExecutor(mc)
+	exec := NewExecutor(mc, "")
 	_, err := exec.Exec(context.Background(), "echo hello", 5*time.Second)
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
@@ -690,7 +690,7 @@ func TestExecUsesPipeline(t *testing.T) {
 
 func TestRunInitUsesPipeline(t *testing.T) {
 	mc := newMockController("%0")
-	exec := NewExecutor(mc)
+	exec := NewExecutor(mc, "")
 
 	if err := exec.RunInit(context.Background(), "export PS1=''"); err != nil {
 		t.Fatalf("RunInit: %v", err)
@@ -702,5 +702,72 @@ func TestRunInitUsesPipeline(t *testing.T) {
 
 	if calls != 1 {
 		t.Errorf("pipelineCalls = %d, want 1 (send-keys + wait-for should use pipeline)", calls)
+	}
+}
+
+func TestExecUsesSocketPath(t *testing.T) {
+	mc := newMockController("%0")
+	mc.responses["capture-pane"] = "cmd; tmux wait-for -S __sshtmux_wf_1\noutput"
+	mc.responses["display-message"] = "0"
+
+	exec := NewExecutor(mc, "/tmp/my-socket")
+	_, err := exec.Exec(context.Background(), "echo hello", 5*time.Second)
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+
+	cmds := mc.getCommands()
+	// send-keys embeds shell-quoted tmux -S <path> commands.
+	// ShellQuote nests quotes, so check for the path and "tmux -S" pattern.
+	sendKeys := cmds[1]
+	if !strings.Contains(sendKeys, "tmux -S") {
+		t.Errorf("send-keys should contain 'tmux -S': %q", sendKeys)
+	}
+	if !strings.Contains(sendKeys, "/tmp/my-socket") {
+		t.Errorf("send-keys should contain socket path: %q", sendKeys)
+	}
+	if !strings.Contains(sendKeys, "set-option") {
+		t.Errorf("send-keys should contain set-option: %q", sendKeys)
+	}
+}
+
+func TestRunInitUsesSocketPath(t *testing.T) {
+	mc := newMockController("%0")
+	exec := NewExecutor(mc, "/tmp/my-socket")
+
+	if err := exec.RunInit(context.Background(), "export PS1=''"); err != nil {
+		t.Fatalf("RunInit: %v", err)
+	}
+
+	cmds := mc.getCommands()
+	sendKeys := cmds[0]
+	if !strings.Contains(sendKeys, "tmux -S") {
+		t.Errorf("send-keys should contain 'tmux -S': %q", sendKeys)
+	}
+	if !strings.Contains(sendKeys, "/tmp/my-socket") {
+		t.Errorf("send-keys should contain socket path: %q", sendKeys)
+	}
+}
+
+func TestExecWithoutSocketPath(t *testing.T) {
+	mc := newMockController("%0")
+	mc.responses["capture-pane"] = "cmd; tmux wait-for -S __sshtmux_wf_1\noutput"
+	mc.responses["display-message"] = "0"
+
+	exec := NewExecutor(mc, "") // no socket path
+	_, err := exec.Exec(context.Background(), "echo hello", 5*time.Second)
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+
+	cmds := mc.getCommands()
+	sendKeys := cmds[1]
+	// Should use bare "tmux" — the only "-S" is the wait-for signal flag,
+	// not a socket path flag. Check there's no "tmux -S" (socket) pattern.
+	if strings.Contains(sendKeys, "tmux -S") {
+		t.Errorf("send-keys should not contain 'tmux -S' when no socket path: %q", sendKeys)
+	}
+	if !strings.Contains(sendKeys, "tmux set-option") {
+		t.Errorf("send-keys should contain 'tmux set-option': %q", sendKeys)
 	}
 }

@@ -21,15 +21,29 @@ type ExecResult struct {
 
 // Executor runs commands via tmux wait-for synchronization.
 type Executor struct {
-	ctrl    tmux.Controller
-	counter atomic.Int64
-	sem     chan struct{} // size 1, serializes Exec/RunInit on this session
+	ctrl       tmux.Controller
+	counter    atomic.Int64
+	sem        chan struct{} // size 1, serializes Exec/RunInit on this session
+	socketPath string       // tmux socket path for -S flag in shell-embedded tmux commands
 }
 
 // NewExecutor creates a new executor using the given tmux controller.
-func NewExecutor(ctrl tmux.Controller) *Executor {
-	e := &Executor{ctrl: ctrl, sem: make(chan struct{}, 1)}
+// socketPath is the tmux server socket path; when non-empty, all tmux
+// commands embedded in shell lines use -S to reach the correct server
+// (critical when pre_command spawns a new shell that clears TMUX env var).
+func NewExecutor(ctrl tmux.Controller, socketPath string) *Executor {
+	e := &Executor{ctrl: ctrl, sem: make(chan struct{}, 1), socketPath: socketPath}
 	return e
+}
+
+// tmuxCmd returns the tmux command prefix for shell-embedded commands.
+// When a socket path is configured, includes -S to ensure the command
+// reaches the correct tmux server regardless of environment.
+func (e *Executor) tmuxCmd() string {
+	if e.socketPath != "" {
+		return "tmux -S " + tmux.ShellQuote(e.socketPath)
+	}
+	return "tmux"
 }
 
 // Exec executes a command in the tmux pane and returns the output + exit code.
@@ -72,9 +86,10 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 	// Step 2+3: Send command and wait-for in a single pipeline write.
 	// This eliminates the SSH round-trip gap between send-keys and wait-for,
 	// preventing the shell from signaling before wait-for is registered.
+	tmuxBin := e.tmuxCmd()
 	shellLine := fmt.Sprintf(
-		"%s; __rv=$?; tmux set-option -p @sshtmux-rv \"$__rv\"; tmux wait-for -S %s",
-		command, channel,
+		"%s; __rv=$?; %s set-option -p @sshtmux-rv \"$__rv\"; %s wait-for -S %s",
+		command, tmuxBin, tmuxBin, channel,
 	)
 	sendCmd := tmux.FormatSendKeys(paneID, shellLine)
 	waitCmd := fmt.Sprintf("wait-for %s", channel)
@@ -137,15 +152,19 @@ func (e *Executor) RunInit(ctx context.Context, command string) error {
 	}
 
 	channel := fmt.Sprintf("__sshtmux_wf_%d", e.counter.Add(1))
+	vlog.Logf(ctx, "init: running %q channel=%s pane=%s", command, channel, paneID)
 
-	shellLine := fmt.Sprintf("%s; tmux wait-for -S %s", command, channel)
+	tmuxCmd := e.tmuxCmd()
+	shellLine := fmt.Sprintf("%s; %s wait-for -S %s", command, tmuxCmd, channel)
 	sendCmd := tmux.FormatSendKeys(paneID, shellLine)
 	waitCmd := fmt.Sprintf("wait-for %s", channel)
 
+	vlog.Logf(ctx, "init: sending pipeline (send-keys + wait-for)")
 	if _, err := e.ctrl.SendCommandPipeline(ctx, []string{sendCmd, waitCmd}); err != nil {
 		return fmt.Errorf("send-keys+wait-for init: %w", err)
 	}
 
+	vlog.Logf(ctx, "init: %q done", command)
 	return nil
 }
 
