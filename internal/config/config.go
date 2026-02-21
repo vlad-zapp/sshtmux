@@ -22,6 +22,7 @@ type Config struct {
 	SocketPath        string                `toml:"socket_path"`
 	TmuxSocketPath    string                `toml:"tmux_socket_path"`
 	PreCommand        string                `toml:"pre_command"`
+	IgnoreHostKeys    bool                  `toml:"ignore_host_keys"`
 	InitCommands      []string              `toml:"init_commands"`
 	Host              map[string]HostConfig `toml:"host"`
 }
@@ -48,6 +49,7 @@ func Default() Config {
 		ConnectionTimeout: Duration{5 * time.Minute},
 		CommandTimeout:    Duration{30 * time.Second},
 		SocketPath:        socketPath,
+		IgnoreHostKeys:    true,
 		Host:              make(map[string]HostConfig),
 	}
 }

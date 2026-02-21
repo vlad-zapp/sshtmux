@@ -108,7 +108,7 @@ func runDaemon(args []string) {
 		cfg.SocketPath = *socketPath
 	}
 
-	dialer := &sshclient.RealDialer{}
+	dialer := &sshclient.RealDialer{IgnoreHostKeys: cfg.IgnoreHostKeys}
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
 		hs := cfg.HostSettings(host)
 		return session.New(ctx, dialer, host, user, session.Options{

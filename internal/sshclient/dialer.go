@@ -48,7 +48,9 @@ func (c *RealClient) NewSession() (Session, error) {
 }
 
 // RealDialer connects to real SSH servers using ssh_config and ssh-agent.
-type RealDialer struct{}
+type RealDialer struct {
+	IgnoreHostKeys bool
+}
 
 func (d *RealDialer) Dial(ctx context.Context, host, user string) (Client, error) {
 	hostname, port := resolveHostPort(host)
@@ -62,9 +64,15 @@ func (d *RealDialer) Dial(ctx context.Context, host, user string) (Client, error
 		return nil, fmt.Errorf("no SSH authentication methods available")
 	}
 
-	hostKeyCallback, err := buildHostKeyCallback()
-	if err != nil {
-		return nil, fmt.Errorf("host key callback: %w", err)
+	var hostKeyCallback ssh.HostKeyCallback
+	if d.IgnoreHostKeys {
+		hostKeyCallback = ssh.InsecureIgnoreHostKey()
+	} else {
+		var err error
+		hostKeyCallback, err = buildHostKeyCallback()
+		if err != nil {
+			return nil, fmt.Errorf("host key callback: %w", err)
+		}
 	}
 
 	config := &ssh.ClientConfig{

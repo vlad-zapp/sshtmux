@@ -18,6 +18,9 @@ func TestDefault(t *testing.T) {
 	if cfg.CommandTimeout.Duration != 30*time.Second {
 		t.Errorf("CommandTimeout = %v, want %v", cfg.CommandTimeout.Duration, 30*time.Second)
 	}
+	if !cfg.IgnoreHostKeys {
+		t.Error("IgnoreHostKeys should default to true")
+	}
 	if cfg.Host == nil {
 		t.Error("Host map should be initialized")
 	}
@@ -234,6 +237,39 @@ pre_command = "sudo -u app bash"
 	}
 	if hc.PreCommand != "sudo -u app bash" {
 		t.Errorf("Host.PreCommand = %q, want %q", hc.PreCommand, "sudo -u app bash")
+	}
+}
+
+func TestIgnoreHostKeysDefaultTrue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	// Config file that does not mention ignore_host_keys
+	content := `session_name = "test"`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.IgnoreHostKeys {
+		t.Error("IgnoreHostKeys should remain true when not specified in config")
+	}
+}
+
+func TestIgnoreHostKeysExplicitFalse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := `ignore_host_keys = false`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.IgnoreHostKeys {
+		t.Error("IgnoreHostKeys should be false when explicitly set to false")
 	}
 }
 

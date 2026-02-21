@@ -102,6 +102,10 @@ socket_path = "/tmp/sshtmux.sock"
 # Useful when the remote user's default tmux socket is inaccessible
 tmux_socket_path = "/tmp/my-tmux.sock"
 
+# Skip host key verification (default: true)
+# Set to false to verify against ~/.ssh/known_hosts
+ignore_host_keys = true
+
 # Command to run before starting tmux (e.g. become root first)
 # The command is prepended to the tmux invocation: "sudo -i; tmux -C ..."
 pre_command = "sudo -i"
@@ -160,6 +164,7 @@ command_timeout = "5m"
 | `command_timeout` | duration | `"30s"` | Maximum execution time per command |
 | `socket_path` | string | `$XDG_RUNTIME_DIR/sshtmux.sock` | Unix socket for daemon IPC |
 | `tmux_socket_path` | string | *(tmux default)* | Custom tmux socket on the remote host |
+| `ignore_host_keys` | bool | `true` | Skip SSH host key verification |
 | `pre_command` | string | *(none)* | Command to run before tmux (e.g. `"sudo -i"`) |
 | `init_commands` | string list | *(none)* | Shell commands to run when a session is first created |
 
