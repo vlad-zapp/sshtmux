@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "sshtmux": {
+      "type": "stdio",
+      "command": "sshtmux",
+      "args": ["mcp"]
+    }
+  }
+}

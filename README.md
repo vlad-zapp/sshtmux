@@ -39,13 +39,44 @@ The daemon starts automatically on the first command and caches connections for 
 
 ### MCP server
 
-sshtmux includes an MCP server for use with AI tools (Claude Code, etc.):
+sshtmux includes an MCP server for use with AI tools.
 
-```
-sshtmux mcp
+#### VS Code (Copilot)
+
+Add to your `.vscode/mcp.json` (or click "Install" if your editor supports it):
+
+```json
+{
+  "servers": {
+    "sshtmux": {
+      "type": "stdio",
+      "command": "sshtmux",
+      "args": ["mcp"]
+    }
+  }
+}
 ```
 
-This runs on stdio and exposes the `sshtmux_exec` tool.
+#### Claude Code
+
+```bash
+claude mcp add sshtmux -- sshtmux mcp
+```
+
+Or add to your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "sshtmux": {
+      "command": "sshtmux",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+This exposes the `sshtmux_exec` tool over stdio.
 
 ## Configuration
 
