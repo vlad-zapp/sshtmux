@@ -19,6 +19,11 @@ type CommandResult struct {
 type Controller interface {
 	// SendCommand sends a tmux command and waits for %begin/%end or %error response.
 	SendCommand(ctx context.Context, cmd string) (*CommandResult, error)
+	// SendCommandPipeline sends multiple commands in a single write and returns
+	// responses in order. This eliminates SSH round-trip gaps between commands,
+	// preventing race conditions (e.g., wait-for signal arriving before the
+	// wait-for command is processed by tmux).
+	SendCommandPipeline(ctx context.Context, cmds []string) ([]*CommandResult, error)
 	// PaneID returns the ID of the session's pane (e.g., "%0").
 	PaneID() string
 	// SetPaneID sets the pane ID (discovered from initial output).
@@ -201,6 +206,114 @@ func (c *RealController) SendCommand(ctx context.Context, cmd string) (*CommandR
 	case <-c.done:
 		return nil, fmt.Errorf("controller closed")
 	}
+}
+
+// SendCommandPipeline sends multiple commands in a single write and returns
+// responses in order. All commands are written atomically (single Write call),
+// so tmux processes them in sequence with no SSH round-trip gap between them.
+func (c *RealController) SendCommandPipeline(ctx context.Context, cmds []string) ([]*CommandResult, error) {
+	if len(cmds) == 0 {
+		return nil, nil
+	}
+
+	channels := make([]chan commandResponse, len(cmds))
+	for i := range channels {
+		channels[i] = make(chan commandResponse, 1)
+	}
+
+	c.mu.Lock()
+	c.queueMu.Lock()
+	for _, ch := range channels {
+		c.queue = append(c.queue, ch)
+	}
+	c.queueMu.Unlock()
+
+	// Write all commands in a single call so they arrive atomically.
+	var buf strings.Builder
+	for _, cmd := range cmds {
+		buf.WriteString(cmd)
+		buf.WriteByte('\n')
+	}
+	_, err := io.WriteString(c.w, buf.String())
+	c.mu.Unlock()
+
+	if err != nil {
+		// Remove all our channels from the queue.
+		c.queueMu.Lock()
+		chSet := make(map[chan commandResponse]struct{}, len(channels))
+		for _, ch := range channels {
+			chSet[ch] = struct{}{}
+		}
+		filtered := c.queue[:0]
+		for _, qch := range c.queue {
+			if _, ok := chSet[qch]; !ok {
+				filtered = append(filtered, qch)
+			}
+		}
+		c.queue = filtered
+		c.queueMu.Unlock()
+		return nil, fmt.Errorf("write pipeline: %w", err)
+	}
+
+	// Collect responses in order.
+	results := make([]*CommandResult, len(cmds))
+	for i, ch := range channels {
+		select {
+		case <-ctx.Done():
+			// Clean up remaining channels from queue.
+			c.queueMu.Lock()
+			remaining := make(map[chan commandResponse]struct{}, len(channels)-i)
+			for _, rch := range channels[i:] {
+				remaining[rch] = struct{}{}
+			}
+			filtered := c.queue[:0]
+			for _, qch := range c.queue {
+				if _, ok := remaining[qch]; !ok {
+					filtered = append(filtered, qch)
+				}
+			}
+			c.queue = filtered
+			c.queueMu.Unlock()
+			return nil, ctx.Err()
+		case resp := <-ch:
+			if resp.err != nil {
+				// Clean up remaining channels from queue.
+				c.queueMu.Lock()
+				remaining := make(map[chan commandResponse]struct{}, len(channels)-i-1)
+				for _, rch := range channels[i+1:] {
+					remaining[rch] = struct{}{}
+				}
+				filtered := c.queue[:0]
+				for _, qch := range c.queue {
+					if _, ok := remaining[qch]; !ok {
+						filtered = append(filtered, qch)
+					}
+				}
+				c.queue = filtered
+				c.queueMu.Unlock()
+				return nil, resp.err
+			}
+			results[i] = resp.result
+		case <-c.done:
+			// Clean up remaining channels from queue.
+			c.queueMu.Lock()
+			remaining := make(map[chan commandResponse]struct{}, len(channels)-i)
+			for _, rch := range channels[i:] {
+				remaining[rch] = struct{}{}
+			}
+			filtered := c.queue[:0]
+			for _, qch := range c.queue {
+				if _, ok := remaining[qch]; !ok {
+					filtered = append(filtered, qch)
+				}
+			}
+			c.queue = filtered
+			c.queueMu.Unlock()
+			return nil, fmt.Errorf("controller closed")
+		}
+	}
+
+	return results, nil
 }
 
 // PaneID returns the current pane ID.

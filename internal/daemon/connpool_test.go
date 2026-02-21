@@ -25,6 +25,17 @@ type noopController struct {
 func (c *noopController) SendCommand(ctx context.Context, cmd string) (*tmux.CommandResult, error) {
 	return &tmux.CommandResult{}, nil
 }
+func (c *noopController) SendCommandPipeline(ctx context.Context, cmds []string) ([]*tmux.CommandResult, error) {
+	results := make([]*tmux.CommandResult, len(cmds))
+	for i, cmd := range cmds {
+		r, err := c.SendCommand(ctx, cmd)
+		if err != nil {
+			return nil, err
+		}
+		results[i] = r
+	}
+	return results, nil
+}
 func (c *noopController) PaneID() string       { return c.paneID }
 func (c *noopController) SetPaneID(id string)   { c.paneID = id }
 func (c *noopController) Alive() bool             { return c.alive }

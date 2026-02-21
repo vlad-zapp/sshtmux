@@ -524,3 +524,148 @@ func TestControllerWaitStartupThenCommand(t *testing.T) {
 		t.Errorf("Data = %q, want %%0", result.Data)
 	}
 }
+
+func TestSendCommandPipeline(t *testing.T) {
+	cmdR, cmdW := io.Pipe()
+	respR, respW := io.Pipe()
+
+	go simulateTmux(cmdR, respW, []string{"result1", "result2"})
+	defer cmdR.Close()
+
+	ctrl := NewController(respR, cmdW)
+	defer func() {
+		cmdW.Close()
+		respR.Close()
+		ctrl.Close()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	results, err := ctrl.SendCommandPipeline(ctx, []string{"cmd1", "cmd2"})
+	if err != nil {
+		t.Fatalf("SendCommandPipeline: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("got %d results, want 2", len(results))
+	}
+	if results[0].Data != "result1" {
+		t.Errorf("results[0].Data = %q, want %q", results[0].Data, "result1")
+	}
+	if results[1].Data != "result2" {
+		t.Errorf("results[1].Data = %q, want %q", results[1].Data, "result2")
+	}
+}
+
+func TestSendCommandPipelineEmpty(t *testing.T) {
+	ctrl := &RealController{done: make(chan struct{})}
+	results, err := ctrl.SendCommandPipeline(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("SendCommandPipeline(nil): %v", err)
+	}
+	if results != nil {
+		t.Errorf("expected nil results, got %v", results)
+	}
+}
+
+func TestSendCommandPipelineContextCancel(t *testing.T) {
+	cmdR, cmdW := io.Pipe()
+	respR, _ := io.Pipe() // no responses — will block
+
+	go func() {
+		io.Copy(io.Discard, cmdR)
+	}()
+
+	ctrl := NewController(respR, cmdW)
+	defer func() {
+		cmdW.Close()
+		cmdR.Close()
+		respR.Close()
+		ctrl.Close()
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	_, err := ctrl.SendCommandPipeline(ctx, []string{"cmd1", "cmd2"})
+	if err != context.Canceled {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+
+	// Verify no dangling channels in the queue
+	ctrl.queueMu.Lock()
+	qLen := len(ctrl.queue)
+	ctrl.queueMu.Unlock()
+	if qLen != 0 {
+		t.Errorf("queue length = %d, want 0 after cancellation", qLen)
+	}
+}
+
+func TestSendCommandPipelineWriteError(t *testing.T) {
+	cmdR, cmdW := io.Pipe()
+	respR, _ := io.Pipe()
+
+	go func() {
+		io.Copy(io.Discard, cmdR)
+	}()
+
+	ctrl := NewController(respR, cmdW)
+
+	// Close the write pipe to force a write error
+	cmdW.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_, err := ctrl.SendCommandPipeline(ctx, []string{"cmd1", "cmd2"})
+	if err == nil {
+		t.Error("expected error after writer closed")
+	}
+
+	// Verify no dangling channels in the queue
+	ctrl.queueMu.Lock()
+	qLen := len(ctrl.queue)
+	ctrl.queueMu.Unlock()
+	if qLen != 0 {
+		t.Errorf("queue length = %d, want 0 after write error", qLen)
+	}
+
+	cmdR.Close()
+	respR.Close()
+}
+
+func TestSendCommandPipelineThenSendCommand(t *testing.T) {
+	cmdR, cmdW := io.Pipe()
+	respR, respW := io.Pipe()
+
+	go simulateTmux(cmdR, respW, []string{"p1", "p2", "single"})
+	defer cmdR.Close()
+
+	ctrl := NewController(respR, cmdW)
+	defer func() {
+		cmdW.Close()
+		respR.Close()
+		ctrl.Close()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Pipeline first
+	results, err := ctrl.SendCommandPipeline(ctx, []string{"cmd1", "cmd2"})
+	if err != nil {
+		t.Fatalf("SendCommandPipeline: %v", err)
+	}
+	if results[0].Data != "p1" || results[1].Data != "p2" {
+		t.Errorf("pipeline results = %q, %q; want p1, p2", results[0].Data, results[1].Data)
+	}
+
+	// Then a regular SendCommand
+	result, err := ctrl.SendCommand(ctx, "cmd3")
+	if err != nil {
+		t.Fatalf("SendCommand: %v", err)
+	}
+	if result.Data != "single" {
+		t.Errorf("Data = %q, want %q", result.Data, "single")
+	}
+}

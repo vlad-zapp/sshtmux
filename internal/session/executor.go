@@ -69,22 +69,22 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 		return nil, fmt.Errorf("clear-history: %w", err)
 	}
 
-	// Step 2: Send command with wait-for sync suffix
+	// Step 2+3: Send command and wait-for in a single pipeline write.
+	// This eliminates the SSH round-trip gap between send-keys and wait-for,
+	// preventing the shell from signaling before wait-for is registered.
 	shellLine := fmt.Sprintf(
 		"%s; __rv=$?; tmux set-option -p @sshtmux-rv \"$__rv\"; tmux wait-for -S %s",
 		command, channel,
 	)
 	sendCmd := tmux.FormatSendKeys(paneID, shellLine)
-	if _, err := e.ctrl.SendCommand(ctx, sendCmd); err != nil {
-		return nil, fmt.Errorf("send-keys: %w", err)
-	}
-
-	vlog.Logf(ctx, "exec: send-keys done, waiting for completion")
-	// Step 3: Block until shell signals via wait-for
 	waitCmd := fmt.Sprintf("wait-for %s", channel)
-	if _, err := e.ctrl.SendCommand(ctx, waitCmd); err != nil {
-		return nil, fmt.Errorf("wait-for: %w", err)
+
+	vlog.Logf(ctx, "exec: sending send-keys + wait-for pipeline")
+	results, err := e.ctrl.SendCommandPipeline(ctx, []string{sendCmd, waitCmd})
+	if err != nil {
+		return nil, fmt.Errorf("send-keys+wait-for pipeline: %w", err)
 	}
+	_ = results // send-keys and wait-for responses are empty on success
 
 	// Step 4: Capture pane content. The command has finished, so all output
 	// is in the pane buffer. -p prints to stdout (returned via %begin/%end),
@@ -140,13 +140,10 @@ func (e *Executor) RunInit(ctx context.Context, command string) error {
 
 	shellLine := fmt.Sprintf("%s; tmux wait-for -S %s", command, channel)
 	sendCmd := tmux.FormatSendKeys(paneID, shellLine)
-	if _, err := e.ctrl.SendCommand(ctx, sendCmd); err != nil {
-		return fmt.Errorf("send-keys init: %w", err)
-	}
-
 	waitCmd := fmt.Sprintf("wait-for %s", channel)
-	if _, err := e.ctrl.SendCommand(ctx, waitCmd); err != nil {
-		return fmt.Errorf("wait-for init: %w", err)
+
+	if _, err := e.ctrl.SendCommandPipeline(ctx, []string{sendCmd, waitCmd}); err != nil {
+		return fmt.Errorf("send-keys+wait-for init: %w", err)
 	}
 
 	return nil

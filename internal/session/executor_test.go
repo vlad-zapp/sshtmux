@@ -20,6 +20,8 @@ type mockController struct {
 	responses map[string]string
 	// blockPrefixes: commands matching these prefixes block until context is done
 	blockPrefixes []string
+	// pipelineCalls tracks number of SendCommandPipeline invocations
+	pipelineCalls int
 }
 
 func newMockController(paneID string) *mockController {
@@ -58,6 +60,21 @@ func (m *mockController) SendCommand(ctx context.Context, cmd string) (*tmux.Com
 		}
 	}
 	return &tmux.CommandResult{}, nil
+}
+
+func (m *mockController) SendCommandPipeline(ctx context.Context, cmds []string) ([]*tmux.CommandResult, error) {
+	m.mu.Lock()
+	m.pipelineCalls++
+	m.mu.Unlock()
+	results := make([]*tmux.CommandResult, len(cmds))
+	for i, cmd := range cmds {
+		r, err := m.SendCommand(ctx, cmd)
+		if err != nil {
+			return nil, err
+		}
+		results[i] = r
+	}
+	return results, nil
 }
 
 func (m *mockController) PaneID() string {
@@ -648,5 +665,42 @@ func TestRunInitSendKeysFormat(t *testing.T) {
 	}
 	if !strings.Contains(cmds[0], "tmux wait-for -S") {
 		t.Errorf("cmd[0] should contain wait-for signal: %q", cmds[0])
+	}
+}
+
+func TestExecUsesPipeline(t *testing.T) {
+	mc := newMockController("%0")
+	mc.responses["capture-pane"] = "cmd; tmux wait-for -S __sshtmux_wf_1\noutput"
+	mc.responses["display-message"] = "0"
+
+	exec := NewExecutor(mc)
+	_, err := exec.Exec(context.Background(), "echo hello", 5*time.Second)
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+
+	mc.mu.Lock()
+	calls := mc.pipelineCalls
+	mc.mu.Unlock()
+
+	if calls != 1 {
+		t.Errorf("pipelineCalls = %d, want 1 (send-keys + wait-for should use pipeline)", calls)
+	}
+}
+
+func TestRunInitUsesPipeline(t *testing.T) {
+	mc := newMockController("%0")
+	exec := NewExecutor(mc)
+
+	if err := exec.RunInit(context.Background(), "export PS1=''"); err != nil {
+		t.Fatalf("RunInit: %v", err)
+	}
+
+	mc.mu.Lock()
+	calls := mc.pipelineCalls
+	mc.mu.Unlock()
+
+	if calls != 1 {
+		t.Errorf("pipelineCalls = %d, want 1 (send-keys + wait-for should use pipeline)", calls)
 	}
 }
