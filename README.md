@@ -45,7 +45,7 @@ sshtmux includes an MCP server for use with AI tools (Claude Code, etc.):
 sshtmux mcp
 ```
 
-This runs on stdio and exposes three tools: `sshtmux_exec`, `sshtmux_disconnect`, and `sshtmux_status`.
+This runs on stdio and exposes the `sshtmux_exec` tool.
 
 ## Configuration
 

@@ -39,14 +39,6 @@ func TestExecToolDaemonError(t *testing.T) {
 	}
 	srv := New(ms)
 
-	// Test that the sender receives the correct request type
-	ms.response = &daemon.Response{
-		Success:  true,
-		Output:   "hello world",
-		ExitCode: 0,
-	}
-
-	// Verify the server was created with 3 tools
 	if srv.sender != ms {
 		t.Error("sender not set correctly")
 	}
@@ -81,42 +73,5 @@ func TestMockSenderExec(t *testing.T) {
 	}
 	if ms.lastRequest.Host != "host1" {
 		t.Errorf("Host = %q, want %q", ms.lastRequest.Host, "host1")
-	}
-}
-
-func TestMockSenderStatus(t *testing.T) {
-	ms := &mockSender{
-		response: &daemon.Response{
-			Success: true,
-			Output:  "[]",
-		},
-	}
-
-	resp, err := ms.Send(daemon.Request{Type: "status"})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if resp.Output != "[]" {
-		t.Errorf("Output = %q, want %q", resp.Output, "[]")
-	}
-}
-
-func TestMockSenderDisconnect(t *testing.T) {
-	ms := &mockSender{
-		response: &daemon.Response{
-			Success: true,
-			Output:  "disconnected",
-		},
-	}
-
-	resp, err := ms.Send(daemon.Request{
-		Type: "disconnect",
-		Host: "host1",
-	})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if !resp.Success {
-		t.Error("expected success")
 	}
 }
