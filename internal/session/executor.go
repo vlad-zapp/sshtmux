@@ -16,7 +16,14 @@ import (
 const (
 	// drainQuietPeriod is how long to wait for additional output after the
 	// last notification before considering output collection complete.
+	// Used by RunInit where we don't need to capture output.
 	drainQuietPeriod = 50 * time.Millisecond
+
+	// outputDrainTimeout is the maximum time to wait for the shell prompt
+	// after wait-for returns. This is the fallback in case prompt detection
+	// fails (e.g., non-standard prompt). Normally, Phase 2 terminates as
+	// soon as the prompt is detected.
+	outputDrainTimeout = 5 * time.Second
 )
 
 // ExecResult holds the result of a command execution.
@@ -61,9 +68,10 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 	//
 	// Two-phase collection:
 	//   Phase 1: Collect output while command runs (between send-keys and wait-for).
-	//   Phase 2: After wait-for, drain remaining output until no notifications
-	//            arrive for drainQuietPeriod. This handles late %output notifications
-	//            that tmux sends asynchronously after processing wait-for.
+	//   Phase 2: After wait-for, collect remaining output until the shell prompt
+	//            appears (we set PS1='$ ' during session init). This reliably
+	//            captures all output regardless of network latency or gaps.
+	//            Falls back to outputDrainTimeout if no prompt is detected.
 	collectCtx, collectCancel := context.WithCancel(ctx)
 	defer collectCancel()
 	waitDone := make(chan struct{})
@@ -93,9 +101,12 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 		}
 
 	drain:
-		// Phase 2: Drain remaining output until quiet for drainQuietPeriod
-		grace := time.NewTimer(drainQuietPeriod)
-		defer grace.Stop()
+		// Phase 2: Wait for the shell prompt to appear, indicating all
+		// command output has been delivered. The prompt is written to the
+		// PTY after the command finishes, so tmux sends all command output
+		// as %output before the prompt notification.
+		timeout := time.NewTimer(outputDrainTimeout)
+		defer timeout.Stop()
 		for {
 			select {
 			case n, ok := <-e.ctrl.OutputChan():
@@ -104,15 +115,15 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 				}
 				if n.PaneID == paneID {
 					parts = append(parts, n.Data)
-				}
-				if !grace.Stop() {
-					select {
-					case <-grace.C:
-					default:
+					// Check if this notification ends with the shell prompt.
+					// We only match the prompt as a standalone chunk or after
+					// a newline, NOT as a suffix of arbitrary output — this
+					// avoids false positives from commands that output "$ ".
+					if endsWithShellPrompt(n.Data) {
+						return
 					}
 				}
-				grace.Reset(drainQuietPeriod)
-			case <-grace.C:
+			case <-timeout.C:
 				return
 			case <-collectCtx.Done():
 				return
@@ -242,6 +253,16 @@ func stripANSI(s string) string {
 func isPrompt(line string) bool {
 	return line == "$ " || line == "# " ||
 		strings.HasSuffix(line, "$ ") || strings.HasSuffix(line, "# ")
+}
+
+// endsWithShellPrompt returns true if the notification data ends with the
+// shell prompt on its own (either the entire data is the prompt, or the
+// prompt appears after a newline). This is stricter than isPrompt to avoid
+// false positives from command output that happens to contain "$ ".
+func endsWithShellPrompt(data string) bool {
+	stripped := stripANSI(data)
+	return stripped == "$ " || stripped == "# " ||
+		strings.HasSuffix(stripped, "\n$ ") || strings.HasSuffix(stripped, "\n# ")
 }
 
 // postProcessOutput strips the leading command echo, trailing prompt, and ANSI codes.

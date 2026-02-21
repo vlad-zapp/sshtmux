@@ -177,6 +177,7 @@ func TestExecExitCodeParseError(t *testing.T) {
 	go func() {
 		time.Sleep(5 * time.Millisecond)
 		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "output\n"}
+		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "$ "}
 	}()
 
 	ctx := context.Background()
@@ -407,6 +408,130 @@ func TestExecLateOutput(t *testing.T) {
 	}
 }
 
+func TestExecOutputWithLargeGaps(t *testing.T) {
+	// Simulate kubectl-like output that arrives in chunks with gaps > 50ms.
+	// Without prompt-based detection, the old 50ms quiet period would cut off
+	// chunk2 and chunk3.
+	mc := newMockController("%0")
+	mc.responses["display-message"] = "0"
+
+	exec := NewExecutor(mc)
+
+	go func() {
+		time.Sleep(2 * time.Millisecond)
+		mc.outputCh <- tmux.Notification{
+			PaneID: "%0",
+			Data:   "$ cmd; __rv=$?; tmux set-option -p @sshtmux-rv \"$__rv\"; tmux wait-for -S __sshtmux_wf_1\n",
+		}
+		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "NAMESPACE   NAME        READY\n"}
+		time.Sleep(100 * time.Millisecond) // >50ms gap (network latency)
+		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "kube-system coredns-0   1/1\n"}
+		time.Sleep(100 * time.Millisecond) // >50ms gap
+		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "default     nginx-1     1/1\n"}
+		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "$ "}
+	}()
+
+	ctx := context.Background()
+	result, err := exec.Exec(ctx, "cmd", 5*time.Second)
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !strings.Contains(result.Output, "NAMESPACE") {
+		t.Errorf("Output missing NAMESPACE header, got %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "coredns-0") {
+		t.Errorf("Output missing coredns-0 (lost after gap), got %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "nginx-1") {
+		t.Errorf("Output missing nginx-1 (lost after gap), got %q", result.Output)
+	}
+}
+
+func TestExecNoPromptFallsBackToTimeout(t *testing.T) {
+	// If the prompt never appears (unusual shell), the timeout fallback should
+	// still collect whatever output arrived. The Exec timeout must be longer
+	// than outputDrainTimeout (5s) to allow the drain to complete.
+	if testing.Short() {
+		t.Skip("skipping slow test in short mode")
+	}
+
+	mc := newMockController("%0")
+	mc.responses["display-message"] = "0"
+
+	exec := NewExecutor(mc)
+
+	go func() {
+		time.Sleep(2 * time.Millisecond)
+		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "output-line\n"}
+		// No prompt sent — collector should fall back to outputDrainTimeout
+	}()
+
+	ctx := context.Background()
+	result, err := exec.Exec(ctx, "cmd", 10*time.Second)
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !strings.Contains(result.Output, "output-line") {
+		t.Errorf("Output = %q, want to contain output-line", result.Output)
+	}
+}
+
+func TestExecOutputContainingDollarSign(t *testing.T) {
+	// Verify that "$ " in command output doesn't cause false prompt detection.
+	mc := newMockController("%0")
+	mc.responses["display-message"] = "0"
+
+	exec := NewExecutor(mc)
+
+	go func() {
+		time.Sleep(2 * time.Millisecond)
+		mc.outputCh <- tmux.Notification{
+			PaneID: "%0",
+			Data:   "$ cmd; __rv=$?; tmux set-option -p @sshtmux-rv \"$__rv\"; tmux wait-for -S __sshtmux_wf_1\n",
+		}
+		// Output line containing "$ " — should NOT trigger prompt detection
+		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "price is 100$ per unit\n"}
+		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "total: 200$ \n"}
+		// Actual prompt
+		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "$ "}
+	}()
+
+	ctx := context.Background()
+	result, err := exec.Exec(ctx, "cmd", 5*time.Second)
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !strings.Contains(result.Output, "price is 100$ per unit") {
+		t.Errorf("Output missing first line, got %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "total: 200$ ") {
+		t.Errorf("Output missing second line (false prompt detection?), got %q", result.Output)
+	}
+}
+
+func TestEndsWithShellPrompt(t *testing.T) {
+	tests := []struct {
+		data string
+		want bool
+	}{
+		{"$ ", true},              // prompt only
+		{"# ", true},              // root prompt
+		{"output\n$ ", true},      // prompt after newline
+		{"output\n# ", true},      // root prompt after newline
+		{"100$ ", false},          // dollar in output
+		{"echo $ ", false},        // dollar in command
+		{"100$ \n", false},        // dollar at end of output line (has trailing newline)
+		{"money$ per unit", false}, // dollar in middle
+		{"", false},
+	}
+	for _, tt := range tests {
+		got := endsWithShellPrompt(tt.data)
+		if got != tt.want {
+			t.Errorf("endsWithShellPrompt(%q) = %v, want %v", tt.data, got, tt.want)
+		}
+	}
+}
+
 func TestExecMultipleCommands(t *testing.T) {
 	mc := newMockController("%0")
 	mc.responses["display-message"] = "0"
@@ -420,6 +545,7 @@ func TestExecMultipleCommands(t *testing.T) {
 				PaneID: "%0",
 				Data:   fmt.Sprintf("output-%d\n", n),
 			}
+			mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "$ "}
 		}(i)
 
 		ctx := context.Background()

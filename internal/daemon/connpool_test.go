@@ -26,7 +26,9 @@ func (c *noopController) SendCommand(ctx context.Context, cmd string) (*tmux.Com
 	return &tmux.CommandResult{}, nil
 }
 func (c *noopController) OutputChan() <-chan tmux.Notification {
-	return make(chan tmux.Notification)
+	ch := make(chan tmux.Notification)
+	close(ch)
+	return ch
 }
 func (c *noopController) PaneID() string       { return c.paneID }
 func (c *noopController) SetPaneID(id string)   { c.paneID = id }

@@ -31,6 +31,7 @@ func TestSessionExec(t *testing.T) {
 	go func() {
 		time.Sleep(5 * time.Millisecond)
 		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "hello\n"}
+		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "$ "}
 	}()
 
 	ctx := context.Background()
