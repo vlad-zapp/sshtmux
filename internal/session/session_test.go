@@ -24,15 +24,10 @@ func TestNewFromController(t *testing.T) {
 
 func TestSessionExec(t *testing.T) {
 	mc := newMockController("%0")
+	mc.responses["capture-pane"] = "$ echo hello; __rv=$?; tmux set-option -p @sshtmux-rv \"$__rv\"; tmux wait-for -S __sshtmux_wf_1\nhello\n$ "
 	mc.responses["display-message"] = "0"
 
 	sess := NewFromController(mc, "testhost", "testuser")
-
-	go func() {
-		time.Sleep(5 * time.Millisecond)
-		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "hello\n"}
-		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "$ "}
-	}()
 
 	ctx := context.Background()
 	result, err := sess.Exec(ctx, "echo hello", 5*time.Second)

@@ -94,28 +94,19 @@ func (m *mockController) getCommands() []string {
 	return out
 }
 
+func (m *mockController) setResponse(prefix, data string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.responses[prefix] = data
+}
+
 func TestExecBasic(t *testing.T) {
 	mc := newMockController("%0")
-	mc.responses["display-message"] = "0" // exit code 0
+	// capture-pane returns the pane content including command echo and output
+	mc.responses["capture-pane"] = "$ ls -la; __rv=$?; tmux set-option -p @sshtmux-rv \"$__rv\"; tmux wait-for -S __sshtmux_wf_1\nfile1.txt\nfile2.txt\n$ "
+	mc.responses["display-message"] = "0"
 
 	exec := NewExecutor(mc)
-
-	// Simulate output arriving (use __sshtmux_wf_ channel format)
-	go func() {
-		time.Sleep(5 * time.Millisecond)
-		mc.outputCh <- tmux.Notification{
-			PaneID: "%0",
-			Data:   "$ ls -la; __rv=$?; tmux set-option -p @sshtmux-rv \"$__rv\"; tmux wait-for -S __sshtmux_wf_1\n",
-		}
-		mc.outputCh <- tmux.Notification{
-			PaneID: "%0",
-			Data:   "file1.txt\nfile2.txt\n",
-		}
-		mc.outputCh <- tmux.Notification{
-			PaneID: "%0",
-			Data:   "$ ",
-		}
-	}()
 
 	ctx := context.Background()
 	result, err := exec.Exec(ctx, "ls -la", 5*time.Second)
@@ -129,34 +120,34 @@ func TestExecBasic(t *testing.T) {
 		t.Errorf("Output = %q, want to contain file1.txt", result.Output)
 	}
 
-	// Verify command sequence: send-keys, wait-for, display-message
+	// Verify command sequence: clear-history, send-keys, wait-for, capture-pane, display-message
 	cmds := mc.getCommands()
-	if len(cmds) != 3 {
-		t.Fatalf("got %d commands, want 3: %v", len(cmds), cmds)
+	if len(cmds) != 5 {
+		t.Fatalf("got %d commands, want 5: %v", len(cmds), cmds)
 	}
-	if !strings.HasPrefix(cmds[0], "send-keys") {
-		t.Errorf("cmd[0] = %q, want send-keys prefix", cmds[0])
+	if !strings.HasPrefix(cmds[0], "clear-history") {
+		t.Errorf("cmd[0] = %q, want clear-history prefix", cmds[0])
 	}
-	if !strings.HasPrefix(cmds[1], "wait-for") {
-		t.Errorf("cmd[1] = %q, want wait-for prefix", cmds[1])
+	if !strings.HasPrefix(cmds[1], "send-keys") {
+		t.Errorf("cmd[1] = %q, want send-keys prefix", cmds[1])
 	}
-	if !strings.HasPrefix(cmds[2], "display-message") {
-		t.Errorf("cmd[2] = %q, want display-message prefix", cmds[2])
+	if !strings.HasPrefix(cmds[2], "wait-for") {
+		t.Errorf("cmd[2] = %q, want wait-for prefix", cmds[2])
+	}
+	if !strings.HasPrefix(cmds[3], "capture-pane") {
+		t.Errorf("cmd[3] = %q, want capture-pane prefix", cmds[3])
+	}
+	if !strings.HasPrefix(cmds[4], "display-message") {
+		t.Errorf("cmd[4] = %q, want display-message prefix", cmds[4])
 	}
 }
 
 func TestExecNonZeroExitCode(t *testing.T) {
 	mc := newMockController("%0")
-	mc.responses["display-message"] = "127" // command not found
+	mc.responses["capture-pane"] = "$ cmd; __rv=$?; tmux set-option -p @sshtmux-rv \"$__rv\"; tmux wait-for -S __sshtmux_wf_1\nbash: cmd: command not found\n$ "
+	mc.responses["display-message"] = "127"
 
 	exec := NewExecutor(mc)
-
-	go func() {
-		time.Sleep(5 * time.Millisecond)
-		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "$ cmd\n"}
-		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "bash: cmd: command not found\n"}
-		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "$ "}
-	}()
 
 	ctx := context.Background()
 	result, err := exec.Exec(ctx, "cmd", 5*time.Second)
@@ -170,15 +161,10 @@ func TestExecNonZeroExitCode(t *testing.T) {
 
 func TestExecExitCodeParseError(t *testing.T) {
 	mc := newMockController("%0")
-	mc.responses["display-message"] = "notanumber" // invalid exit code
+	mc.responses["capture-pane"] = "output\n$ "
+	mc.responses["display-message"] = "notanumber"
 
 	exec := NewExecutor(mc)
-
-	go func() {
-		time.Sleep(5 * time.Millisecond)
-		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "output\n"}
-		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "$ "}
-	}()
 
 	ctx := context.Background()
 	_, err := exec.Exec(ctx, "cmd", 5*time.Second)
@@ -248,30 +234,6 @@ func TestRunInitNoPaneID(t *testing.T) {
 	}
 }
 
-func TestRunInitDrainsOutput(t *testing.T) {
-	mc := newMockController("%0")
-	exec := NewExecutor(mc)
-
-	// Simulate output from init command
-	go func() {
-		time.Sleep(5 * time.Millisecond)
-		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "init output\n"}
-	}()
-
-	ctx := context.Background()
-	if err := exec.RunInit(ctx, "echo init"); err != nil {
-		t.Fatalf("RunInit: %v", err)
-	}
-
-	// Verify the output channel is drained (no stale output left)
-	select {
-	case n := <-mc.outputCh:
-		t.Errorf("unexpected leftover notification: %+v", n)
-	default:
-		// good - channel is empty
-	}
-}
-
 func TestPostProcessOutput(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -321,6 +283,18 @@ func TestPostProcessOutput(t *testing.T) {
 			channel: "ch2",
 			want:    "output",
 		},
+		{
+			name:    "capture-pane with trailing blank lines",
+			raw:     "$ cmd; tmux wait-for -S ch3\noutput\n$ \n\n\n",
+			channel: "ch3",
+			want:    "output",
+		},
+		{
+			name:    "capture-pane with previous content",
+			raw:     "old stuff\n$ cmd; tmux wait-for -S ch4\nfresh output\n$ \n\n",
+			channel: "ch4",
+			want:    "fresh output",
+		},
 	}
 
 	for _, tt := range tests {
@@ -352,84 +326,22 @@ func TestPostProcessOutputPromptStripped(t *testing.T) {
 	}
 }
 
-func TestDrainOutputClosedChannel(t *testing.T) {
+func TestExecLargeOutput(t *testing.T) {
+	// Simulate large command output (e.g., kubectl get pods -A).
+	// With capture-pane, this is completely reliable — no timing issues.
 	mc := newMockController("%0")
-	exec := NewExecutor(mc)
 
-	close(mc.outputCh)
-
-	// Should not hang/loop infinitely
-	done := make(chan struct{})
-	go func() {
-		exec.drainOutput()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// ok
-	case <-time.After(time.Second):
-		t.Fatal("drainOutput hung on closed channel")
+	var lines []string
+	lines = append(lines, "$ cmd; __rv=$?; tmux set-option -p @sshtmux-rv \"$__rv\"; tmux wait-for -S __sshtmux_wf_1")
+	lines = append(lines, "NAMESPACE   NAME        READY")
+	for i := range 100 {
+		lines = append(lines, fmt.Sprintf("kube-system pod-%d      1/1", i))
 	}
-}
-
-func TestExecLateOutput(t *testing.T) {
-	mc := newMockController("%0")
+	lines = append(lines, "$ ")
+	mc.responses["capture-pane"] = strings.Join(lines, "\n")
 	mc.responses["display-message"] = "0"
 
 	exec := NewExecutor(mc)
-
-	// Simulate output that arrives AFTER wait-for returns.
-	go func() {
-		time.Sleep(2 * time.Millisecond)
-		mc.outputCh <- tmux.Notification{
-			PaneID: "%0",
-			Data:   "$ set; __rv=$?; tmux set-option -p @sshtmux-rv \"$__rv\"; tmux wait-for -S __sshtmux_wf_1\n",
-		}
-		// This output arrives 30ms after the command starts.
-		time.Sleep(30 * time.Millisecond)
-		mc.outputCh <- tmux.Notification{
-			PaneID: "%0",
-			Data:   "LATE_VAR=late_value\n",
-		}
-		mc.outputCh <- tmux.Notification{
-			PaneID: "%0",
-			Data:   "$ ",
-		}
-	}()
-
-	ctx := context.Background()
-	result, err := exec.Exec(ctx, "set", 5*time.Second)
-	if err != nil {
-		t.Fatalf("Exec: %v", err)
-	}
-	if !strings.Contains(result.Output, "LATE_VAR=late_value") {
-		t.Errorf("Output = %q, want to contain LATE_VAR=late_value (late output lost)", result.Output)
-	}
-}
-
-func TestExecOutputWithLargeGaps(t *testing.T) {
-	// Simulate kubectl-like output that arrives in chunks with gaps > 50ms.
-	// Without prompt-based detection, the old 50ms quiet period would cut off
-	// chunk2 and chunk3.
-	mc := newMockController("%0")
-	mc.responses["display-message"] = "0"
-
-	exec := NewExecutor(mc)
-
-	go func() {
-		time.Sleep(2 * time.Millisecond)
-		mc.outputCh <- tmux.Notification{
-			PaneID: "%0",
-			Data:   "$ cmd; __rv=$?; tmux set-option -p @sshtmux-rv \"$__rv\"; tmux wait-for -S __sshtmux_wf_1\n",
-		}
-		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "NAMESPACE   NAME        READY\n"}
-		time.Sleep(100 * time.Millisecond) // >50ms gap (network latency)
-		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "kube-system coredns-0   1/1\n"}
-		time.Sleep(100 * time.Millisecond) // >50ms gap
-		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "default     nginx-1     1/1\n"}
-		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "$ "}
-	}()
 
 	ctx := context.Background()
 	result, err := exec.Exec(ctx, "cmd", 5*time.Second)
@@ -437,98 +349,15 @@ func TestExecOutputWithLargeGaps(t *testing.T) {
 		t.Fatalf("Exec: %v", err)
 	}
 	if !strings.Contains(result.Output, "NAMESPACE") {
-		t.Errorf("Output missing NAMESPACE header, got %q", result.Output)
+		t.Errorf("Output missing header")
 	}
-	if !strings.Contains(result.Output, "coredns-0") {
-		t.Errorf("Output missing coredns-0 (lost after gap), got %q", result.Output)
+	if !strings.Contains(result.Output, "pod-99") {
+		t.Errorf("Output missing last pod")
 	}
-	if !strings.Contains(result.Output, "nginx-1") {
-		t.Errorf("Output missing nginx-1 (lost after gap), got %q", result.Output)
-	}
-}
-
-func TestExecNoPromptFallsBackToTimeout(t *testing.T) {
-	// If the prompt never appears (unusual shell), the timeout fallback should
-	// still collect whatever output arrived. The Exec timeout must be longer
-	// than outputDrainTimeout (5s) to allow the drain to complete.
-	if testing.Short() {
-		t.Skip("skipping slow test in short mode")
-	}
-
-	mc := newMockController("%0")
-	mc.responses["display-message"] = "0"
-
-	exec := NewExecutor(mc)
-
-	go func() {
-		time.Sleep(2 * time.Millisecond)
-		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "output-line\n"}
-		// No prompt sent — collector should fall back to outputDrainTimeout
-	}()
-
-	ctx := context.Background()
-	result, err := exec.Exec(ctx, "cmd", 10*time.Second)
-	if err != nil {
-		t.Fatalf("Exec: %v", err)
-	}
-	if !strings.Contains(result.Output, "output-line") {
-		t.Errorf("Output = %q, want to contain output-line", result.Output)
-	}
-}
-
-func TestExecOutputContainingDollarSign(t *testing.T) {
-	// Verify that "$ " in command output doesn't cause false prompt detection.
-	mc := newMockController("%0")
-	mc.responses["display-message"] = "0"
-
-	exec := NewExecutor(mc)
-
-	go func() {
-		time.Sleep(2 * time.Millisecond)
-		mc.outputCh <- tmux.Notification{
-			PaneID: "%0",
-			Data:   "$ cmd; __rv=$?; tmux set-option -p @sshtmux-rv \"$__rv\"; tmux wait-for -S __sshtmux_wf_1\n",
-		}
-		// Output line containing "$ " — should NOT trigger prompt detection
-		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "price is 100$ per unit\n"}
-		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "total: 200$ \n"}
-		// Actual prompt
-		mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "$ "}
-	}()
-
-	ctx := context.Background()
-	result, err := exec.Exec(ctx, "cmd", 5*time.Second)
-	if err != nil {
-		t.Fatalf("Exec: %v", err)
-	}
-	if !strings.Contains(result.Output, "price is 100$ per unit") {
-		t.Errorf("Output missing first line, got %q", result.Output)
-	}
-	if !strings.Contains(result.Output, "total: 200$ ") {
-		t.Errorf("Output missing second line (false prompt detection?), got %q", result.Output)
-	}
-}
-
-func TestEndsWithShellPrompt(t *testing.T) {
-	tests := []struct {
-		data string
-		want bool
-	}{
-		{"$ ", true},              // prompt only
-		{"# ", true},              // root prompt
-		{"output\n$ ", true},      // prompt after newline
-		{"output\n# ", true},      // root prompt after newline
-		{"100$ ", false},          // dollar in output
-		{"echo $ ", false},        // dollar in command
-		{"100$ \n", false},        // dollar at end of output line (has trailing newline)
-		{"money$ per unit", false}, // dollar in middle
-		{"", false},
-	}
-	for _, tt := range tests {
-		got := endsWithShellPrompt(tt.data)
-		if got != tt.want {
-			t.Errorf("endsWithShellPrompt(%q) = %v, want %v", tt.data, got, tt.want)
-		}
+	// Count lines
+	outputLines := strings.Count(result.Output, "\n") + 1
+	if outputLines != 101 {
+		t.Errorf("got %d lines, want 101", outputLines)
 	}
 }
 
@@ -539,14 +368,12 @@ func TestExecMultipleCommands(t *testing.T) {
 	exec := NewExecutor(mc)
 
 	for i := range 3 {
-		go func(n int) {
-			time.Sleep(5 * time.Millisecond)
-			mc.outputCh <- tmux.Notification{
-				PaneID: "%0",
-				Data:   fmt.Sprintf("output-%d\n", n),
-			}
-			mc.outputCh <- tmux.Notification{PaneID: "%0", Data: "$ "}
-		}(i)
+		// Set capture-pane response for this command
+		// Channel increments: __sshtmux_wf_1, __sshtmux_wf_2, __sshtmux_wf_3
+		// But clear-history is cmd 1, so counter is 1 for clear + 1 for the channel per call
+		// Actually: counter starts at 0. First Exec: counter.Add(1) = 1, second = 2, third = 3
+		channel := fmt.Sprintf("__sshtmux_wf_%d", i+1)
+		mc.setResponse("capture-pane", fmt.Sprintf("$ cmd-%d; tmux wait-for -S %s\noutput-%d\n$ ", i, channel, i))
 
 		ctx := context.Background()
 		result, err := exec.Exec(ctx, fmt.Sprintf("cmd-%d", i), 5*time.Second)
@@ -556,5 +383,58 @@ func TestExecMultipleCommands(t *testing.T) {
 		if result.ExitCode != 0 {
 			t.Errorf("Exec[%d] ExitCode = %d, want 0", i, result.ExitCode)
 		}
+		if !strings.Contains(result.Output, fmt.Sprintf("output-%d", i)) {
+			t.Errorf("Exec[%d] Output = %q, want to contain output-%d", i, result.Output, i)
+		}
+	}
+}
+
+func TestExecCapturePaneContainsDollarSign(t *testing.T) {
+	// Verify that "$ " in command output doesn't get stripped
+	// (only the actual trailing prompt should be stripped).
+	mc := newMockController("%0")
+	mc.responses["capture-pane"] = "$ cmd; __rv=$?; tmux set-option -p @sshtmux-rv \"$__rv\"; tmux wait-for -S __sshtmux_wf_1\nprice is 100$ per unit\ntotal: 200$ \n$ "
+	mc.responses["display-message"] = "0"
+
+	exec := NewExecutor(mc)
+
+	ctx := context.Background()
+	result, err := exec.Exec(ctx, "cmd", 5*time.Second)
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !strings.Contains(result.Output, "price is 100$ per unit") {
+		t.Errorf("Output missing first line, got %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "total: 200$ ") {
+		t.Errorf("Output missing second line, got %q", result.Output)
+	}
+}
+
+func TestExecClearHistoryCalledBeforeEachCommand(t *testing.T) {
+	mc := newMockController("%0")
+	mc.responses["capture-pane"] = "$ cmd; tmux wait-for -S __sshtmux_wf_1\noutput\n$ "
+	mc.responses["display-message"] = "0"
+
+	exec := NewExecutor(mc)
+
+	for range 3 {
+		ctx := context.Background()
+		_, err := exec.Exec(ctx, "cmd", 5*time.Second)
+		if err != nil {
+			t.Fatalf("Exec: %v", err)
+		}
+	}
+
+	cmds := mc.getCommands()
+	// Each Exec sends 5 commands: clear-history, send-keys, wait-for, capture-pane, display-message
+	clearCount := 0
+	for _, cmd := range cmds {
+		if strings.HasPrefix(cmd, "clear-history") {
+			clearCount++
+		}
+	}
+	if clearCount != 3 {
+		t.Errorf("clear-history called %d times, want 3", clearCount)
 	}
 }

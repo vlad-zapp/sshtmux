@@ -142,6 +142,11 @@ func (s *Session) startTmux(ctx context.Context, preCommand, tmuxSocketPath stri
 		return fmt.Errorf("disable mouse: %w", err)
 	}
 
+	// Set a large scrollback buffer so capture-pane can retrieve all output
+	// even from commands that produce many lines. Non-fatal since default
+	// 2000 lines is usually enough.
+	ctrl.SendCommand(ctx, "set-option -p history-limit 50000")
+
 	// Set TERM=dumb to disable ANSI colors, bracketed paste mode, etc.
 	// Set a simple PS1 prompt to avoid color codes from .bashrc prompt settings
 	// (PS1 is set before TERM=dumb takes effect on future commands).

@@ -13,19 +13,6 @@ import (
 	"github.com/vlad-zapp/sshtmux/internal/vlog"
 )
 
-const (
-	// drainQuietPeriod is how long to wait for additional output after the
-	// last notification before considering output collection complete.
-	// Used by RunInit where we don't need to capture output.
-	drainQuietPeriod = 50 * time.Millisecond
-
-	// outputDrainTimeout is the maximum time to wait for the shell prompt
-	// after wait-for returns. This is the fallback in case prompt detection
-	// fails (e.g., non-standard prompt). Normally, Phase 2 terminates as
-	// soon as the prompt is detected.
-	outputDrainTimeout = 5 * time.Second
-)
-
 // ExecResult holds the result of a command execution.
 type ExecResult struct {
 	Output   string
@@ -44,7 +31,13 @@ func NewExecutor(ctrl tmux.Controller) *Executor {
 }
 
 // Exec executes a command in the tmux pane and returns the output + exit code.
-// Uses tmux wait-for for synchronization and pane options for exit code retrieval.
+// Uses tmux wait-for for synchronization and capture-pane for output retrieval.
+//
+// Flow: clear-history → send-keys → wait-for → capture-pane → display-message
+//
+// After wait-for returns, the command has finished and all output has been
+// written to the pane. capture-pane synchronously retrieves the complete pane
+// content via %begin/%end, eliminating all timing issues from %output collection.
 func (e *Executor) Exec(ctx context.Context, command string, timeout time.Duration) (*ExecResult, error) {
 	if timeout > 0 {
 		var cancel context.CancelFunc
@@ -57,106 +50,43 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 		return nil, fmt.Errorf("pane ID not set")
 	}
 
-	// Drain any stale output notifications before starting
-	e.drainOutput()
-
 	channel := fmt.Sprintf("__sshtmux_wf_%d", e.counter.Add(1))
 	vlog.Printf("exec: running command=%q channel=%s pane=%s", command, channel, paneID)
 
-	// Start output collector BEFORE send-keys so we capture all notifications
-	// including those that arrive during the send-keys %begin/%end processing.
-	//
-	// Two-phase collection:
-	//   Phase 1: Collect output while command runs (between send-keys and wait-for).
-	//   Phase 2: After wait-for, collect remaining output until the shell prompt
-	//            appears (we set PS1='$ ' during session init). This reliably
-	//            captures all output regardless of network latency or gaps.
-	//            Falls back to outputDrainTimeout if no prompt is detected.
-	collectCtx, collectCancel := context.WithCancel(ctx)
-	defer collectCancel()
-	waitDone := make(chan struct{})
-	outputResult := make(chan string, 1)
+	// Step 1: Clear scrollback so capture-pane returns only this command's output.
+	// This prevents unbounded scrollback growth and simplifies output extraction.
+	clearCmd := fmt.Sprintf("clear-history -t %s", paneID)
+	if _, err := e.ctrl.SendCommand(ctx, clearCmd); err != nil {
+		return nil, fmt.Errorf("clear-history: %w", err)
+	}
 
-	go func() {
-		var parts []string
-		defer func() {
-			outputResult <- strings.Join(parts, "")
-		}()
-
-		// Phase 1: Collect output while command runs
-		for {
-			select {
-			case n, ok := <-e.ctrl.OutputChan():
-				if !ok {
-					return
-				}
-				if n.PaneID == paneID {
-					parts = append(parts, n.Data)
-				}
-			case <-waitDone:
-				goto drain
-			case <-collectCtx.Done():
-				return
-			}
-		}
-
-	drain:
-		// Phase 2: Wait for the shell prompt to appear, indicating all
-		// command output has been delivered. The prompt is written to the
-		// PTY after the command finishes, so tmux sends all command output
-		// as %output before the prompt notification.
-		timeout := time.NewTimer(outputDrainTimeout)
-		defer timeout.Stop()
-		for {
-			select {
-			case n, ok := <-e.ctrl.OutputChan():
-				if !ok {
-					return
-				}
-				if n.PaneID == paneID {
-					parts = append(parts, n.Data)
-					// Check if this notification ends with the shell prompt.
-					// We only match the prompt as a standalone chunk or after
-					// a newline, NOT as a suffix of arbitrary output — this
-					// avoids false positives from commands that output "$ ".
-					if endsWithShellPrompt(n.Data) {
-						return
-					}
-				}
-			case <-timeout.C:
-				return
-			case <-collectCtx.Done():
-				return
-			}
-		}
-	}()
-
-	// Step 1: Send command with wait-for sync suffix
+	// Step 2: Send command with wait-for sync suffix
 	shellLine := fmt.Sprintf(
 		"%s; __rv=$?; tmux set-option -p @sshtmux-rv \"$__rv\"; tmux wait-for -S %s",
 		command, channel,
 	)
 	sendCmd := tmux.FormatSendKeys(paneID, shellLine)
 	if _, err := e.ctrl.SendCommand(ctx, sendCmd); err != nil {
-		collectCancel()
-		<-outputResult
 		return nil, fmt.Errorf("send-keys: %w", err)
 	}
 
 	vlog.Printf("exec: send-keys done, waiting for completion")
-	// Step 2: Block until shell signals via wait-for
+	// Step 3: Block until shell signals via wait-for
 	waitCmd := fmt.Sprintf("wait-for %s", channel)
 	if _, err := e.ctrl.SendCommand(ctx, waitCmd); err != nil {
-		collectCancel()
-		<-outputResult
 		return nil, fmt.Errorf("wait-for: %w", err)
 	}
 
-	// Signal collector to enter drain mode (Phase 2)
-	close(waitDone)
-	rawOutput := <-outputResult
+	// Step 4: Capture pane content. The command has finished, so all output
+	// is in the pane buffer. -p prints to stdout (returned via %begin/%end),
+	// -J joins wrapped lines, -S - starts from beginning of scrollback.
+	captureCmd := fmt.Sprintf("capture-pane -p -J -S - -t %s", paneID)
+	captureResult, err := e.ctrl.SendCommand(ctx, captureCmd)
+	if err != nil {
+		return nil, fmt.Errorf("capture-pane: %w", err)
+	}
 
-	// Step 3: Read exit code from pane option
+	// Step 5: Read exit code from pane option
 	displayCmd := fmt.Sprintf("display-message -p -t %s '#{@sshtmux-rv}'", paneID)
 	result, err := e.ctrl.SendCommand(ctx, displayCmd)
 	if err != nil {
@@ -173,7 +103,7 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 	}
 
 	// Post-process output: strip echo, prompt, ANSI codes
-	output := postProcessOutput(rawOutput, channel)
+	output := postProcessOutput(captureResult.Data, channel)
 
 	vlog.Printf("exec: done exit_code=%d output_len=%d", exitCode, len(output))
 	return &ExecResult{
@@ -182,21 +112,8 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 	}, nil
 }
 
-// drainOutput discards any pending output notifications.
-func (e *Executor) drainOutput() {
-	for {
-		select {
-		case _, ok := <-e.ctrl.OutputChan():
-			if !ok {
-				return
-			}
-		default:
-			return
-		}
-	}
-}
-
 // RunInit executes an init command using the wait-for pattern.
+// No output capture is needed for init commands.
 func (e *Executor) RunInit(ctx context.Context, command string) error {
 	paneID := e.ctrl.PaneID()
 	if paneID == "" {
@@ -216,29 +133,7 @@ func (e *Executor) RunInit(ctx context.Context, command string) error {
 		return fmt.Errorf("wait-for init: %w", err)
 	}
 
-	// Drain output produced by init command using timer-based drain
-	// (same pattern as Exec Phase 2: read until quiet for drainQuietPeriod)
-	grace := time.NewTimer(drainQuietPeriod)
-	defer grace.Stop()
-	for {
-		select {
-		case _, ok := <-e.ctrl.OutputChan():
-			if !ok {
-				return nil
-			}
-			if !grace.Stop() {
-				select {
-				case <-grace.C:
-				default:
-				}
-			}
-			grace.Reset(drainQuietPeriod)
-		case <-grace.C:
-			return nil
-		case <-ctx.Done():
-			return nil
-		}
-	}
+	return nil
 }
 
 // ansiRegex matches ANSI escape sequences.
@@ -255,18 +150,9 @@ func isPrompt(line string) bool {
 		strings.HasSuffix(line, "$ ") || strings.HasSuffix(line, "# ")
 }
 
-// endsWithShellPrompt returns true if the notification data ends with the
-// shell prompt on its own (either the entire data is the prompt, or the
-// prompt appears after a newline). This is stricter than isPrompt to avoid
-// false positives from command output that happens to contain "$ ".
-func endsWithShellPrompt(data string) bool {
-	stripped := stripANSI(data)
-	return stripped == "$ " || stripped == "# " ||
-		strings.HasSuffix(stripped, "\n$ ") || strings.HasSuffix(stripped, "\n# ")
-}
-
 // postProcessOutput strips the leading command echo, trailing prompt, and ANSI codes.
 // The channel parameter is the unique wait-for channel name used to identify the echo boundary.
+// Works with both %output notification data and capture-pane output.
 func postProcessOutput(raw, channel string) string {
 	// Strip ANSI escape sequences first
 	raw = stripANSI(raw)
@@ -290,14 +176,18 @@ func postProcessOutput(raw, channel string) string {
 		}
 	}
 
-	// Strip trailing prompt: only strip the last partial line (no trailing newline)
-	// if it matches a known prompt pattern. This preserves output from commands
-	// like `printf 'hello'` that don't end with a newline.
-	if len(raw) > 0 && !strings.HasSuffix(raw, "\n") {
+	// Trim trailing blank lines before prompt detection.
+	// capture-pane may include empty rows from the pane area below the cursor.
+	raw = strings.TrimRight(raw, "\n")
+
+	// Strip trailing prompt if the last line matches a known prompt pattern.
+	// This preserves output from commands like `printf 'hello'` that don't
+	// end with a newline.
+	if len(raw) > 0 {
 		if idx := strings.LastIndex(raw, "\n"); idx >= 0 {
 			lastLine := raw[idx+1:]
 			if isPrompt(lastLine) {
-				raw = raw[:idx+1]
+				raw = raw[:idx]
 			}
 		} else {
 			// Entire output is a single partial line
@@ -307,7 +197,7 @@ func postProcessOutput(raw, channel string) string {
 		}
 	}
 
-	// Remove trailing newline for clean output
+	// Final cleanup
 	raw = strings.TrimRight(raw, "\n")
 
 	return raw
