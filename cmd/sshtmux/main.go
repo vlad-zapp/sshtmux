@@ -14,6 +14,7 @@ import (
 	"github.com/vlad-zapp/sshtmux/internal/mcpserver"
 	"github.com/vlad-zapp/sshtmux/internal/session"
 	"github.com/vlad-zapp/sshtmux/internal/sshclient"
+	"github.com/vlad-zapp/sshtmux/internal/vlog"
 )
 
 func main() {
@@ -22,32 +23,47 @@ func main() {
 		os.Exit(1)
 	}
 
-	switch os.Args[1] {
+	args := os.Args[1:]
+
+	// Parse -v as first argument
+	if args[0] == "-v" {
+		vlog.Enabled = true
+		args = args[1:]
+		if len(args) == 0 {
+			printUsage()
+			os.Exit(1)
+		}
+	}
+
+	switch args[0] {
 	case "daemon":
-		runDaemon(os.Args[2:])
+		runDaemon(args[1:])
 	case "mcp":
 		runMCP()
 	case "status":
 		runStatus()
 	case "disconnect":
-		runDisconnect(os.Args[2:])
+		runDisconnect(args[1:])
 	case "shutdown":
 		runShutdown()
 	case "help", "--help", "-h":
 		printUsage()
 	default:
-		runExec(os.Args[1:])
+		runExec(args)
 	}
 }
 
 func printUsage() {
 	fmt.Fprintf(os.Stderr, `Usage:
-  sshtmux [user@]host command   Execute command on remote host
-  sshtmux status                Show cached connections
-  sshtmux disconnect [host]     Close cached connection
-  sshtmux shutdown              Stop the daemon
-  sshtmux daemon [--socket path] Run the daemon (auto-started by CLI)
-  sshtmux mcp                   Run MCP server (stdio)
+  sshtmux [-v] [user@]host command   Execute command on remote host
+  sshtmux status                     Show cached connections
+  sshtmux disconnect [host]          Close cached connection
+  sshtmux shutdown                   Stop the daemon
+  sshtmux daemon [--socket path]     Run the daemon (auto-started by CLI)
+  sshtmux mcp                        Run MCP server (stdio)
+
+Options:
+  -v    Verbose output (must be first argument)
 `)
 }
 
@@ -62,26 +78,33 @@ func loadConfig() config.Config {
 
 func runExec(args []string) {
 	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: sshtmux [user@]host command [args...]\n")
+		fmt.Fprintf(os.Stderr, "Usage: sshtmux [-v] [user@]host command [args...]\n")
 		os.Exit(1)
 	}
 
 	host, user := parseHostUser(args[0])
 	command := strings.Join(args[1:], " ")
 
+	vlog.Printf("cli: exec host=%q user=%q command=%q", host, user, command)
+
 	cfg := loadConfig()
 	c := client.NewClient(cfg.SocketPath)
+	c.Verbose = vlog.Enabled
 
+	vlog.Printf("cli: ensuring daemon is running (socket=%s)", cfg.SocketPath)
 	if err := c.EnsureDaemon(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error starting daemon: %v\n", err)
 		os.Exit(1)
 	}
 
+	vlog.Printf("cli: sending exec request to daemon")
 	resp, err := c.Exec(host, user, command)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+
+	vlog.Printf("cli: got response success=%v exit_code=%d error=%q", resp.Success, resp.ExitCode, resp.Error)
 
 	if resp.Error != "" {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", resp.Error)
@@ -101,14 +124,21 @@ func runExec(args []string) {
 func runDaemon(args []string) {
 	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
 	socketPath := fs.String("socket", "", "Unix socket path")
+	verbose := fs.Bool("verbose", false, "Verbose logging")
 	fs.Parse(args)
+
+	if *verbose {
+		vlog.Enabled = true
+	}
 
 	cfg := loadConfig()
 	if *socketPath != "" {
 		cfg.SocketPath = *socketPath
 	}
 
-	dialer := &sshclient.RealDialer{IgnoreHostKeys: cfg.IgnoreHostKeys}
+	vlog.Printf("daemon: starting (socket=%s ignore_host_keys=%v)", cfg.SocketPath, cfg.IgnoreHostKeys)
+
+	dialer := &sshclient.RealDialer{IgnoreHostKeys: cfg.IgnoreHostKeys, Verbose: vlog.Enabled}
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
 		hs := cfg.HostSettings(host)
 		return session.New(ctx, dialer, host, user, session.Options{
@@ -126,6 +156,7 @@ func runDaemon(args []string) {
 		os.Exit(1)
 	}
 
+	vlog.Printf("daemon: listening on %s", cfg.SocketPath)
 	fmt.Fprintf(os.Stderr, "sshtmux daemon listening on %s\n", cfg.SocketPath)
 	if err := d.Serve(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

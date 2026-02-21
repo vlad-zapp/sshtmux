@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vlad-zapp/sshtmux/internal/tmux"
+	"github.com/vlad-zapp/sshtmux/internal/vlog"
 )
 
 const (
@@ -53,6 +54,7 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 	e.drainOutput()
 
 	channel := fmt.Sprintf("__sshtmux_wf_%d", e.counter.Add(1))
+	vlog.Printf("exec: running command=%q channel=%s pane=%s", command, channel, paneID)
 
 	// Start output collector BEFORE send-keys so we capture all notifications
 	// including those that arrive during the send-keys %begin/%end processing.
@@ -130,6 +132,7 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 		return nil, fmt.Errorf("send-keys: %w", err)
 	}
 
+	vlog.Printf("exec: send-keys done, waiting for completion")
 	// Step 2: Block until shell signals via wait-for
 	waitCmd := fmt.Sprintf("wait-for %s", channel)
 	if _, err := e.ctrl.SendCommand(ctx, waitCmd); err != nil {
@@ -161,6 +164,7 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 	// Post-process output: strip echo, prompt, ANSI codes
 	output := postProcessOutput(rawOutput, channel)
 
+	vlog.Printf("exec: done exit_code=%d output_len=%d", exitCode, len(output))
 	return &ExecResult{
 		Output:   output,
 		ExitCode: exitCode,

@@ -6,7 +6,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
+
+	"github.com/vlad-zapp/sshtmux/internal/vlog"
 )
 
 // Session wraps an SSH session's stdio.
@@ -35,14 +38,17 @@ type Dialer interface {
 // Match, Include, IdentityFile, certificates, FIDO keys, etc.).
 type RealDialer struct {
 	IgnoreHostKeys bool
+	Verbose        bool
 }
 
 func (d *RealDialer) Dial(ctx context.Context, host, user string) (Client, error) {
+	vlog.Printf("ssh: dialing host=%q user=%q", host, user)
 	return &execClient{
 		host:           host,
 		user:           user,
 		ctx:            ctx,
 		ignoreHostKeys: d.IgnoreHostKeys,
+		verbose:        d.Verbose,
 	}, nil
 }
 
@@ -52,6 +58,7 @@ type execClient struct {
 	user           string
 	ctx            context.Context
 	ignoreHostKeys bool
+	verbose        bool
 
 	mu       sync.Mutex
 	sessions []*execSession
@@ -63,6 +70,7 @@ func (c *execClient) NewSession() (Session, error) {
 		user:           c.user,
 		ctx:            c.ctx,
 		ignoreHostKeys: c.ignoreHostKeys,
+		verbose:        c.verbose,
 	}
 	c.mu.Lock()
 	c.sessions = append(c.sessions, s)
@@ -88,6 +96,7 @@ type execSession struct {
 	user           string
 	ctx            context.Context
 	ignoreHostKeys bool
+	verbose        bool
 
 	cmd     *exec.Cmd
 	stdinR  *io.PipeReader
@@ -119,15 +128,23 @@ func (s *execSession) buildArgs(remoteCmd string) []string {
 	if s.ignoreHostKeys {
 		args = append(args, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null")
 	}
+	if s.verbose {
+		args = append(args, "-v")
+	}
 	if s.user != "" {
 		args = append(args, "-l", s.user)
 	}
-	args = append(args, "--", s.host, remoteCmd)
+	args = append(args, "--", s.host)
+	if remoteCmd != "" {
+		args = append(args, remoteCmd)
+	}
 	return args
 }
 
 func (s *execSession) Start(remoteCmd string) error {
-	s.cmd = exec.CommandContext(s.ctx, "ssh", s.buildArgs(remoteCmd)...)
+	args := s.buildArgs(remoteCmd)
+	vlog.Printf("ssh: exec ssh %s", strings.Join(args, " "))
+	s.cmd = exec.CommandContext(s.ctx, "ssh", args...)
 
 	if s.stdinR != nil {
 		s.cmd.Stdin = s.stdinR

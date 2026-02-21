@@ -9,6 +9,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/vlad-zapp/sshtmux/internal/vlog"
 )
 
 const (
@@ -108,6 +110,7 @@ func (d *Daemon) handleConn(conn net.Conn) {
 }
 
 func (d *Daemon) dispatch(req Request) Response {
+	vlog.Printf("daemon: dispatch type=%s host=%q user=%q command=%q", req.Type, req.Host, req.User, req.Command)
 	switch req.Type {
 	case "exec":
 		return d.handleExec(req)
@@ -130,11 +133,13 @@ func (d *Daemon) handleExec(req Request) Response {
 	ctx, cancel := context.WithTimeout(context.Background(), d.commandTimeout)
 	defer cancel()
 
+	vlog.Printf("daemon: getting session for %s@%s", req.User, req.Host)
 	sess, err := d.pool.Get(ctx, req.Host, req.User)
 	if err != nil {
 		return Response{Error: fmt.Sprintf("get session: %v", err)}
 	}
 
+	vlog.Printf("daemon: session ready, executing command")
 	result, err := sess.Exec(ctx, req.Command, 0)
 	if err != nil {
 		return Response{Error: fmt.Sprintf("exec: %v", err)}

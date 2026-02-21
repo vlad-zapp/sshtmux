@@ -21,6 +21,7 @@ const (
 // Client communicates with the sshtmux daemon over a Unix socket.
 type Client struct {
 	SocketPath string
+	Verbose    bool
 }
 
 // NewClient creates a client with the given socket path.
@@ -101,10 +102,18 @@ func (c *Client) EnsureDaemon() error {
 		}
 	}
 
-	cmd := exec.Command(exe, "daemon", "--socket", c.SocketPath)
+	daemonArgs := []string{"daemon", "--socket", c.SocketPath}
+	if c.Verbose {
+		daemonArgs = append(daemonArgs, "--verbose")
+	}
+	cmd := exec.Command(exe, daemonArgs...)
 	cmd.Stdout = nil
-	cmd.Stderr = nil
 	cmd.Stdin = nil
+	if c.Verbose {
+		cmd.Stderr = os.Stderr
+	} else {
+		cmd.Stderr = nil
+	}
 	// Start as a background process
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start daemon: %w", err)

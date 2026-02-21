@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/vlad-zapp/sshtmux/internal/session"
+	"github.com/vlad-zapp/sshtmux/internal/vlog"
 )
 
 // SessionFactory creates a session for a given host.
@@ -62,6 +63,7 @@ func (p *ConnPool) Get(ctx context.Context, host, user string) (*session.Session
 		if entry, ok := p.sessions[key]; ok {
 			entry.lastUsed = time.Now()
 			p.mu.Unlock()
+			vlog.Printf("pool: cache hit for %s", key)
 			return entry.sess, nil
 		}
 
@@ -83,6 +85,7 @@ func (p *ConnPool) Get(ctx context.Context, host, user string) (*session.Session
 		p.mu.Unlock()
 
 		// Create session outside of lock
+		vlog.Printf("pool: cache miss for %s, creating new session", key)
 		sess, err := p.factory(ctx, host, user)
 
 		p.mu.Lock()

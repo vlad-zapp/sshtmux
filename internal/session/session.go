@@ -8,6 +8,7 @@ import (
 
 	"github.com/vlad-zapp/sshtmux/internal/sshclient"
 	"github.com/vlad-zapp/sshtmux/internal/tmux"
+	"github.com/vlad-zapp/sshtmux/internal/vlog"
 )
 
 // Session manages an SSH connection with a tmux control mode session.
@@ -32,6 +33,7 @@ type Options struct {
 
 // New creates a new session: SSH connect → tmux -C → init commands.
 func New(ctx context.Context, dialer sshclient.Dialer, host, user string, opts Options) (*Session, error) {
+	vlog.Printf("session: creating for host=%q user=%q session_name=%q", host, user, opts.SessionName)
 	client, err := dialer.Dial(ctx, host, user)
 	if err != nil {
 		return nil, fmt.Errorf("ssh dial: %w", err)
@@ -44,13 +46,16 @@ func New(ctx context.Context, dialer sshclient.Dialer, host, user string, opts O
 		client:      client,
 	}
 
+	vlog.Printf("session: starting tmux (pre_command=%q tmux_socket=%q)", opts.PreCommand, opts.TmuxSocketPath)
 	if err := s.startTmux(ctx, opts.PreCommand, opts.TmuxSocketPath); err != nil {
 		client.Close()
 		return nil, fmt.Errorf("start tmux: %w", err)
 	}
 
+	vlog.Printf("session: tmux started, running %d init commands", len(opts.InitCommands))
 	// Run init commands
 	for _, cmd := range opts.InitCommands {
+		vlog.Printf("session: init command: %q", cmd)
 		if err := s.executor.RunInit(ctx, cmd); err != nil {
 			s.Close()
 			return nil, fmt.Errorf("init command %q: %w", cmd, err)
@@ -87,15 +92,33 @@ func (s *Session) startTmux(ctx context.Context, preCommand, tmuxSocketPath stri
 	}
 	tmuxCmd += fmt.Sprintf(" -C new-session -A -s %s", tmux.ShellQuote(s.SessionName))
 
-	// Prepend pre-command if configured (e.g. "sudo -i" to become root before tmux)
 	if preCommand != "" {
-		tmuxCmd = preCommand + "; " + tmuxCmd
-	}
+		// Pre-command opens a new shell (e.g. "sudo -i"), so we can't use
+		// a one-liner. Start SSH in shell mode and send commands via stdin.
+		vlog.Printf("session: starting ssh in shell mode")
+		if err := sess.Start(""); err != nil {
+			sess.Close()
+			return fmt.Errorf("start ssh shell: %w", err)
+		}
 
-	if err := sess.Start(tmuxCmd); err != nil {
-		sess.Close()
-		return fmt.Errorf("start tmux: %w", err)
+		vlog.Printf("session: sending pre-command: %s", preCommand)
+		fmt.Fprintf(stdin, "%s\n", preCommand)
+
+		// Wait for the pre-command to establish the new shell before
+		// sending the tmux command. This prevents the parent shell from
+		// buffering both lines in a single read.
+		time.Sleep(1 * time.Second)
+
+		vlog.Printf("session: sending tmux command: %s", tmuxCmd)
+		fmt.Fprintf(stdin, "%s\n", tmuxCmd)
+	} else {
+		vlog.Printf("session: starting remote command: %s", tmuxCmd)
+		if err := sess.Start(tmuxCmd); err != nil {
+			sess.Close()
+			return fmt.Errorf("start tmux: %w", err)
+		}
 	}
+	vlog.Printf("session: ssh process started, waiting for tmux handshake")
 
 	// Create controller
 	ctrl := tmux.NewController(stdout, stdin)
@@ -106,6 +129,7 @@ func (s *Session) startTmux(ctx context.Context, preCommand, tmuxSocketPath stri
 	if err := ctrl.WaitStartup(ctx); err != nil {
 		return fmt.Errorf("tmux startup: %w", err)
 	}
+	vlog.Printf("session: tmux handshake complete")
 
 	// Discover pane ID from initial output
 	if err := s.discoverPane(ctx); err != nil {
@@ -153,6 +177,7 @@ func (s *Session) discoverPane(ctx context.Context) error {
 	if paneID == "" {
 		return fmt.Errorf("empty pane_id")
 	}
+	vlog.Printf("session: discovered pane %s", paneID)
 	s.ctrl.SetPaneID(paneID)
 	return nil
 }
