@@ -27,7 +27,7 @@ func main() {
 
 	// Parse -v as first argument
 	if args[0] == "-v" {
-		vlog.Enabled = true
+		vlog.SetEnabled(true)
 		args = args[1:]
 		if len(args) == 0 {
 			printUsage()
@@ -89,7 +89,6 @@ func runExec(args []string) {
 
 	cfg := loadConfig()
 	c := client.NewClient(cfg.SocketPath)
-	c.Verbose = vlog.Enabled
 
 	vlog.Printf("cli: ensuring daemon is running (socket=%s)", cfg.SocketPath)
 	if err := c.EnsureDaemon(); err != nil {
@@ -128,7 +127,7 @@ func runDaemon(args []string) {
 	fs.Parse(args)
 
 	if *verbose {
-		vlog.Enabled = true
+		vlog.SetEnabled(true)
 	}
 
 	cfg := loadConfig()
@@ -138,7 +137,7 @@ func runDaemon(args []string) {
 
 	vlog.Printf("daemon: starting (socket=%s ignore_host_keys=%v)", cfg.SocketPath, cfg.IgnoreHostKeys)
 
-	dialer := &sshclient.RealDialer{IgnoreHostKeys: cfg.IgnoreHostKeys, Verbose: vlog.Enabled}
+	dialer := &sshclient.RealDialer{IgnoreHostKeys: cfg.IgnoreHostKeys}
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
 		hs := cfg.HostSettings(host)
 		return session.New(ctx, dialer, host, user, session.Options{

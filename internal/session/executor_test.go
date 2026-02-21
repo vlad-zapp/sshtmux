@@ -74,6 +74,10 @@ func (m *mockController) SetPaneID(id string) {
 	m.paneID = id
 }
 
+func (m *mockController) Alive() bool {
+	return true
+}
+
 func (m *mockController) Detach() error {
 	return nil
 }

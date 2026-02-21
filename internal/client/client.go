@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vlad-zapp/sshtmux/internal/daemon"
+	"github.com/vlad-zapp/sshtmux/internal/vlog"
 )
 
 const (
@@ -21,7 +22,6 @@ const (
 // Client communicates with the sshtmux daemon over a Unix socket.
 type Client struct {
 	SocketPath string
-	Verbose    bool
 }
 
 // NewClient creates a client with the given socket path.
@@ -30,7 +30,9 @@ func NewClient(socketPath string) *Client {
 }
 
 // Send sends a request to the daemon and returns the response.
+// Verbose flag is automatically set based on the current vlog state.
 func (c *Client) Send(req daemon.Request) (*daemon.Response, error) {
+	req.Verbose = vlog.GetEnabled()
 	conn, err := net.DialTimeout("unix", c.SocketPath, dialTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("connect to daemon: %w", err)
@@ -102,18 +104,10 @@ func (c *Client) EnsureDaemon() error {
 		}
 	}
 
-	daemonArgs := []string{"daemon", "--socket", c.SocketPath}
-	if c.Verbose {
-		daemonArgs = append(daemonArgs, "--verbose")
-	}
-	cmd := exec.Command(exe, daemonArgs...)
+	cmd := exec.Command(exe, "daemon", "--socket", c.SocketPath)
 	cmd.Stdout = nil
+	cmd.Stderr = nil
 	cmd.Stdin = nil
-	if c.Verbose {
-		cmd.Stderr = os.Stderr
-	} else {
-		cmd.Stderr = nil
-	}
 	// Start as a background process
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start daemon: %w", err)

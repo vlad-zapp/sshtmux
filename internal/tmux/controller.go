@@ -37,6 +37,8 @@ type Controller interface {
 	PaneID() string
 	// SetPaneID sets the pane ID (discovered from initial output).
 	SetPaneID(id string)
+	// Alive returns true if the controller's read loop is still running.
+	Alive() bool
 	// Detach sends a detach command to exit control mode cleanly.
 	Detach() error
 	// Close closes the controller and stops the reader goroutine.
@@ -245,6 +247,16 @@ func (c *RealController) SetPaneID(id string) {
 	c.paneIDMu.Lock()
 	defer c.paneIDMu.Unlock()
 	c.paneID = id
+}
+
+// Alive returns true if the readLoop goroutine is still running.
+func (c *RealController) Alive() bool {
+	select {
+	case <-c.done:
+		return false
+	default:
+		return true
+	}
 }
 
 // Detach sends a detach-client command.

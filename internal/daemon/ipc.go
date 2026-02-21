@@ -13,6 +13,7 @@ type Request struct {
 	Host    string `json:"host"`
 	User    string `json:"user"`
 	Command string `json:"command"`
+	Verbose bool   `json:"verbose,omitempty"`
 }
 
 // Response represents a daemon-to-CLI response.

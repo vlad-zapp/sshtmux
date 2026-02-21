@@ -110,6 +110,7 @@ func (d *Daemon) handleConn(conn net.Conn) {
 }
 
 func (d *Daemon) dispatch(req Request) Response {
+	vlog.SetEnabled(req.Verbose)
 	vlog.Printf("daemon: dispatch type=%s host=%q user=%q command=%q", req.Type, req.Host, req.User, req.Command)
 	switch req.Type {
 	case "exec":

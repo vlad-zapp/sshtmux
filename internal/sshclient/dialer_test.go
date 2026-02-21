@@ -33,7 +33,6 @@ func TestExecSessionStartFailsWithBadCommand(t *testing.T) {
 	s := &execSession{
 		host:           "testhost",
 		user:           "testuser",
-		ctx:            context.Background(),
 		ignoreHostKeys: true,
 	}
 
@@ -157,9 +156,10 @@ func TestDialContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
+	// Dial itself doesn't connect (just creates struct), so it shouldn't fail
+	// even with a cancelled context.
 	client, err := d.Dial(ctx, "testhost", "testuser")
 	if err != nil {
-		// Dial itself doesn't connect, so it shouldn't fail
 		t.Fatalf("Dial should not fail: %v", err)
 	}
 
@@ -170,17 +170,13 @@ func TestDialContextCancelled(t *testing.T) {
 	sess.StdinPipe()
 	sess.StdoutPipe()
 
-	// Start should fail or the process should be killed because context is cancelled
+	// Start spawns ssh process. It may fail if ssh is not available.
 	err = sess.Start("echo hello")
 	if err != nil {
-		// ssh failed to start or was killed — expected with cancelled context
-		return
+		t.Skipf("ssh binary not available: %v", err)
 	}
 
-	// If it started, wait should eventually return with an error
-	err = sess.Wait()
-	// With cancelled context, the process gets killed
-	if err == nil {
-		t.Error("expected error from Wait with cancelled context")
-	}
+	// The SSH process is not tied to the dial context (by design: sessions
+	// outlive individual requests). Close it explicitly.
+	sess.Close()
 }

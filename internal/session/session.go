@@ -182,6 +182,11 @@ func (s *Session) discoverPane(ctx context.Context) error {
 	return nil
 }
 
+// Alive returns true if the session's tmux controller is still running.
+func (s *Session) Alive() bool {
+	return s.ctrl != nil && s.ctrl.Alive()
+}
+
 // Exec executes a command on the remote host.
 func (s *Session) Exec(ctx context.Context, command string, timeout time.Duration) (*ExecResult, error) {
 	return s.executor.Exec(ctx, command, timeout)

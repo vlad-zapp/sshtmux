@@ -19,6 +19,7 @@ func mockFactory(ctrl tmux.Controller) SessionFactory {
 
 type noopController struct {
 	paneID string
+	alive  bool
 }
 
 func (c *noopController) SendCommand(ctx context.Context, cmd string) (*tmux.CommandResult, error) {
@@ -29,6 +30,7 @@ func (c *noopController) OutputChan() <-chan tmux.Notification {
 }
 func (c *noopController) PaneID() string       { return c.paneID }
 func (c *noopController) SetPaneID(id string)   { c.paneID = id }
+func (c *noopController) Alive() bool             { return c.alive }
 func (c *noopController) Detach() error         { return nil }
 func (c *noopController) Close() error          { return nil }
 
@@ -36,7 +38,7 @@ func TestConnPoolGetAndReuse(t *testing.T) {
 	var createCount atomic.Int32
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
 		createCount.Add(1)
-		ctrl := &noopController{paneID: "%0"}
+		ctrl := &noopController{paneID: "%0", alive: true}
 		return session.NewFromController(ctrl, host, user), nil
 	}
 
@@ -74,7 +76,7 @@ func TestConnPoolDifferentHosts(t *testing.T) {
 	var createCount atomic.Int32
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
 		createCount.Add(1)
-		ctrl := &noopController{paneID: "%0"}
+		ctrl := &noopController{paneID: "%0", alive: true}
 		return session.NewFromController(ctrl, host, user), nil
 	}
 
@@ -99,7 +101,7 @@ func TestConnPoolConcurrentSameHost(t *testing.T) {
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
 		createCount.Add(1)
 		time.Sleep(50 * time.Millisecond) // Simulate slow connection
-		ctrl := &noopController{paneID: "%0"}
+		ctrl := &noopController{paneID: "%0", alive: true}
 		return session.NewFromController(ctrl, host, user), nil
 	}
 
@@ -144,7 +146,7 @@ func TestConnPoolConcurrentSameHost(t *testing.T) {
 
 func TestConnPoolDisconnect(t *testing.T) {
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
-		ctrl := &noopController{paneID: "%0"}
+		ctrl := &noopController{paneID: "%0", alive: true}
 		return session.NewFromController(ctrl, host, user), nil
 	}
 
@@ -167,7 +169,7 @@ func TestConnPoolDisconnect(t *testing.T) {
 
 func TestConnPoolDisconnectNotFound(t *testing.T) {
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
-		ctrl := &noopController{paneID: "%0"}
+		ctrl := &noopController{paneID: "%0", alive: true}
 		return session.NewFromController(ctrl, host, user), nil
 	}
 
@@ -182,7 +184,7 @@ func TestConnPoolDisconnectNotFound(t *testing.T) {
 
 func TestConnPoolStatus(t *testing.T) {
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
-		ctrl := &noopController{paneID: "%0"}
+		ctrl := &noopController{paneID: "%0", alive: true}
 		return session.NewFromController(ctrl, host, user), nil
 	}
 
@@ -212,7 +214,7 @@ func TestConnPoolStatus(t *testing.T) {
 
 func TestConnPoolClose(t *testing.T) {
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
-		ctrl := &noopController{paneID: "%0"}
+		ctrl := &noopController{paneID: "%0", alive: true}
 		return session.NewFromController(ctrl, host, user), nil
 	}
 
@@ -234,7 +236,7 @@ func TestConnPoolConcurrentDifferentHosts(t *testing.T) {
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
 		createCount.Add(1)
 		time.Sleep(20 * time.Millisecond)
-		ctrl := &noopController{paneID: "%0"}
+		ctrl := &noopController{paneID: "%0", alive: true}
 		return session.NewFromController(ctrl, host, user), nil
 	}
 
@@ -259,6 +261,45 @@ func TestConnPoolConcurrentDifferentHosts(t *testing.T) {
 
 	if int(createCount.Load()) != len(hosts) {
 		t.Errorf("createCount = %d, want %d", createCount.Load(), len(hosts))
+	}
+}
+
+func TestConnPoolEvictsDeadSession(t *testing.T) {
+	var createCount atomic.Int32
+	ctrl := &noopController{paneID: "%0", alive: true}
+
+	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
+		createCount.Add(1)
+		return session.NewFromController(ctrl, host, user), nil
+	}
+
+	pool := NewConnPool(factory, 5*time.Minute)
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	// First get creates a new session
+	s1, err := pool.Get(ctx, "host1", "user1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if createCount.Load() != 1 {
+		t.Fatalf("createCount = %d, want 1", createCount.Load())
+	}
+
+	// Mark the controller as dead (simulates SSH process exit)
+	ctrl.alive = false
+
+	// Next get should evict the dead session and create a new one
+	s2, err := pool.Get(ctx, "host1", "user1")
+	if err != nil {
+		t.Fatalf("Get after dead: %v", err)
+	}
+	if createCount.Load() != 2 {
+		t.Errorf("createCount = %d, want 2 (should recreate after dead)", createCount.Load())
+	}
+	if s1 == s2 {
+		t.Error("expected different session after eviction")
 	}
 }
 

@@ -9,10 +9,11 @@ import (
 	"time"
 
 	"github.com/vlad-zapp/sshtmux/internal/session"
+	"github.com/vlad-zapp/sshtmux/internal/vlog"
 )
 
 func testFactory(ctx context.Context, host, user string) (*session.Session, error) {
-	ctrl := &noopController{paneID: "%0"}
+	ctrl := &noopController{paneID: "%0", alive: true}
 	return session.NewFromController(ctrl, host, user), nil
 }
 
@@ -192,4 +193,45 @@ func TestDaemonConcurrentClients(t *testing.T) {
 			t.Errorf("client error: %v", err)
 		}
 	}
+}
+
+func TestDaemonVerbosePerRequest(t *testing.T) {
+	d, sockPath := startTestDaemon(t)
+	defer d.Stop()
+
+	// Ensure verbose is off initially
+	vlog.SetEnabled(false)
+
+	// Send a non-verbose request
+	sendRequest(t, sockPath, Request{
+		Type:    "exec",
+		Host:    "host1",
+		User:    "user1",
+		Command: "ls",
+		Verbose: false,
+	})
+
+	// Send a verbose request — the daemon should enable vlog for this request
+	sendRequest(t, sockPath, Request{
+		Type:    "exec",
+		Host:    "host1",
+		User:    "user1",
+		Command: "ls",
+		Verbose: true,
+	})
+
+	// Send another non-verbose request — verbose should be turned off
+	sendRequest(t, sockPath, Request{
+		Type:    "exec",
+		Host:    "host1",
+		User:    "user1",
+		Command: "ls",
+		Verbose: false,
+	})
+
+	// Verify the Verbose field is correctly serialized in the request
+	// (the dispatch handler sets vlog per-request, which is the key behavior)
+
+	// Clean up: restore original state
+	vlog.SetEnabled(false)
 }

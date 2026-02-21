@@ -61,10 +61,16 @@ func (p *ConnPool) Get(ctx context.Context, host, user string) (*session.Session
 
 		// Check cache
 		if entry, ok := p.sessions[key]; ok {
-			entry.lastUsed = time.Now()
-			p.mu.Unlock()
-			vlog.Printf("pool: cache hit for %s", key)
-			return entry.sess, nil
+			if entry.sess.Alive() {
+				entry.lastUsed = time.Now()
+				p.mu.Unlock()
+				vlog.Printf("pool: cache hit for %s", key)
+				return entry.sess, nil
+			}
+			// Session is dead, evict from cache
+			vlog.Printf("pool: evicting dead session for %s", key)
+			delete(p.sessions, key)
+			go entry.sess.Close()
 		}
 
 		// Check if someone else is creating this session

@@ -38,7 +38,6 @@ type Dialer interface {
 // Match, Include, IdentityFile, certificates, FIDO keys, etc.).
 type RealDialer struct {
 	IgnoreHostKeys bool
-	Verbose        bool
 }
 
 func (d *RealDialer) Dial(ctx context.Context, host, user string) (Client, error) {
@@ -46,9 +45,7 @@ func (d *RealDialer) Dial(ctx context.Context, host, user string) (Client, error
 	return &execClient{
 		host:           host,
 		user:           user,
-		ctx:            ctx,
 		ignoreHostKeys: d.IgnoreHostKeys,
-		verbose:        d.Verbose,
 	}, nil
 }
 
@@ -56,9 +53,7 @@ func (d *RealDialer) Dial(ctx context.Context, host, user string) (Client, error
 type execClient struct {
 	host           string
 	user           string
-	ctx            context.Context
 	ignoreHostKeys bool
-	verbose        bool
 
 	mu       sync.Mutex
 	sessions []*execSession
@@ -68,9 +63,7 @@ func (c *execClient) NewSession() (Session, error) {
 	s := &execSession{
 		host:           c.host,
 		user:           c.user,
-		ctx:            c.ctx,
 		ignoreHostKeys: c.ignoreHostKeys,
-		verbose:        c.verbose,
 	}
 	c.mu.Lock()
 	c.sessions = append(c.sessions, s)
@@ -94,9 +87,7 @@ func (c *execClient) Close() error {
 type execSession struct {
 	host           string
 	user           string
-	ctx            context.Context
 	ignoreHostKeys bool
-	verbose        bool
 
 	cmd     *exec.Cmd
 	stdinR  *io.PipeReader
@@ -128,7 +119,7 @@ func (s *execSession) buildArgs(remoteCmd string) []string {
 	if s.ignoreHostKeys {
 		args = append(args, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null")
 	}
-	if s.verbose {
+	if vlog.GetEnabled() {
 		args = append(args, "-v")
 	}
 	if s.user != "" {
@@ -144,7 +135,7 @@ func (s *execSession) buildArgs(remoteCmd string) []string {
 func (s *execSession) Start(remoteCmd string) error {
 	args := s.buildArgs(remoteCmd)
 	vlog.Printf("ssh: exec ssh %s", strings.Join(args, " "))
-	s.cmd = exec.CommandContext(s.ctx, "ssh", args...)
+	s.cmd = exec.Command("ssh", args...)
 
 	if s.stdinR != nil {
 		s.cmd.Stdin = s.stdinR

@@ -24,6 +24,7 @@ func (c *noopController) OutputChan() <-chan tmux.Notification {
 }
 func (c *noopController) PaneID() string     { return c.paneID }
 func (c *noopController) SetPaneID(id string) { c.paneID = id }
+func (c *noopController) Alive() bool          { return true }
 func (c *noopController) Detach() error       { return nil }
 func (c *noopController) Close() error        { return nil }
 
