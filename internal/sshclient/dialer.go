@@ -4,17 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
-	"net"
 	"os"
-	"path/filepath"
-	"time"
-
-	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/agent"
-	"golang.org/x/crypto/ssh/knownhosts"
-
-	sshconfig "github.com/kevinburke/ssh_config"
+	"os/exec"
+	"sync"
 )
 
 // Session wraps an SSH session's stdio.
@@ -38,151 +30,151 @@ type Dialer interface {
 	Dial(ctx context.Context, host, user string) (Client, error)
 }
 
-// RealClient wraps *ssh.Client to implement the Client interface.
-type RealClient struct {
-	*ssh.Client
-}
-
-func (c *RealClient) NewSession() (Session, error) {
-	return c.Client.NewSession()
-}
-
-// RealDialer connects to real SSH servers using ssh_config and ssh-agent.
+// RealDialer creates SSH connections by spawning the openssh binary.
+// This gives full compatibility with ~/.ssh/config (ProxyJump, ProxyCommand,
+// Match, Include, IdentityFile, certificates, FIDO keys, etc.).
 type RealDialer struct {
 	IgnoreHostKeys bool
 }
 
 func (d *RealDialer) Dial(ctx context.Context, host, user string) (Client, error) {
-	hostname, port := resolveHostPort(host)
+	return &execClient{
+		host:           host,
+		user:           user,
+		ctx:            ctx,
+		ignoreHostKeys: d.IgnoreHostKeys,
+	}, nil
+}
 
-	if user == "" {
-		user = resolveUser(host)
+// execClient implements Client by spawning ssh processes.
+type execClient struct {
+	host           string
+	user           string
+	ctx            context.Context
+	ignoreHostKeys bool
+
+	mu       sync.Mutex
+	sessions []*execSession
+}
+
+func (c *execClient) NewSession() (Session, error) {
+	s := &execSession{
+		host:           c.host,
+		user:           c.user,
+		ctx:            c.ctx,
+		ignoreHostKeys: c.ignoreHostKeys,
 	}
+	c.mu.Lock()
+	c.sessions = append(c.sessions, s)
+	c.mu.Unlock()
+	return s, nil
+}
 
-	authMethods := buildAuthMethods()
-	if len(authMethods) == 0 {
-		return nil, fmt.Errorf("no SSH authentication methods available")
+func (c *execClient) Close() error {
+	c.mu.Lock()
+	sessions := c.sessions
+	c.sessions = nil
+	c.mu.Unlock()
+
+	for _, s := range sessions {
+		s.Close()
 	}
+	return nil
+}
 
-	var hostKeyCallback ssh.HostKeyCallback
-	if d.IgnoreHostKeys {
-		hostKeyCallback = ssh.InsecureIgnoreHostKey()
+// execSession implements Session by running an ssh process.
+type execSession struct {
+	host           string
+	user           string
+	ctx            context.Context
+	ignoreHostKeys bool
+
+	cmd     *exec.Cmd
+	stdinR  *io.PipeReader
+	stdoutW *io.PipeWriter
+	stderrW *io.PipeWriter
+	waitCh  chan error
+}
+
+func (s *execSession) StdinPipe() (io.WriteCloser, error) {
+	r, w := io.Pipe()
+	s.stdinR = r
+	return w, nil
+}
+
+func (s *execSession) StdoutPipe() (io.Reader, error) {
+	r, w := io.Pipe()
+	s.stdoutW = w
+	return r, nil
+}
+
+func (s *execSession) StderrPipe() (io.Reader, error) {
+	r, w := io.Pipe()
+	s.stderrW = w
+	return r, nil
+}
+
+func (s *execSession) buildArgs(remoteCmd string) []string {
+	args := []string{"-o", "BatchMode=yes"}
+	if s.ignoreHostKeys {
+		args = append(args, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null")
+	}
+	if s.user != "" {
+		args = append(args, "-l", s.user)
+	}
+	args = append(args, "--", s.host, remoteCmd)
+	return args
+}
+
+func (s *execSession) Start(remoteCmd string) error {
+	s.cmd = exec.CommandContext(s.ctx, "ssh", s.buildArgs(remoteCmd)...)
+
+	if s.stdinR != nil {
+		s.cmd.Stdin = s.stdinR
+	}
+	if s.stdoutW != nil {
+		s.cmd.Stdout = s.stdoutW
 	} else {
-		var err error
-		hostKeyCallback, err = buildHostKeyCallback()
-		if err != nil {
-			return nil, fmt.Errorf("host key callback: %w", err)
+		s.cmd.Stdout = os.Stdout
+	}
+	if s.stderrW != nil {
+		s.cmd.Stderr = s.stderrW
+	} else {
+		s.cmd.Stderr = os.Stderr
+	}
+
+	if err := s.cmd.Start(); err != nil {
+		return fmt.Errorf("start ssh: %w", err)
+	}
+
+	s.waitCh = make(chan error, 1)
+	go func() {
+		err := s.cmd.Wait()
+		if s.stdoutW != nil {
+			s.stdoutW.Close()
 		}
-	}
-
-	config := &ssh.ClientConfig{
-		User:            user,
-		Auth:            authMethods,
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         10 * time.Second,
-	}
-
-	addr := net.JoinHostPort(hostname, port)
-
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		return nil, fmt.Errorf("dial %s: %w", addr, err)
-	}
-
-	// Use the raw connection to establish SSH
-	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, config)
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("ssh handshake %s: %w", addr, err)
-	}
-
-	client := ssh.NewClient(sshConn, chans, reqs)
-	return &RealClient{client}, nil
-}
-
-func resolveHostPort(host string) (string, string) {
-	hostname := sshconfig.Get(host, "Hostname")
-	if hostname == "" {
-		hostname = host
-	}
-	port := sshconfig.Get(host, "Port")
-	if port == "" {
-		port = "22"
-	}
-	return hostname, port
-}
-
-func resolveUser(host string) string {
-	user := sshconfig.Get(host, "User")
-	if user != "" {
-		return user
-	}
-	if u := os.Getenv("USER"); u != "" {
-		return u
-	}
-	return "root"
-}
-
-func buildAuthMethods() []ssh.AuthMethod {
-	var methods []ssh.AuthMethod
-
-	// Try SSH agent first
-	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
-		conn, err := net.Dial("unix", sock)
-		if err == nil {
-			agentClient := agent.NewClient(conn)
-			methods = append(methods, ssh.PublicKeysCallback(agentClient.Signers))
+		if s.stderrW != nil {
+			s.stderrW.Close()
 		}
-	}
-
-	// Try common key files
-	keyFiles := []string{
-		"id_ed25519",
-		"id_rsa",
-		"id_ecdsa",
-	}
-	home, err := os.UserHomeDir()
-	if err == nil {
-		for _, kf := range keyFiles {
-			path := filepath.Join(home, ".ssh", kf)
-			if key, err := loadPrivateKey(path); err == nil {
-				methods = append(methods, key)
-			}
+		if s.stdinR != nil {
+			s.stdinR.Close()
 		}
-	}
+		s.waitCh <- err
+	}()
 
-	return methods
+	return nil
 }
 
-func loadPrivateKey(path string) (ssh.AuthMethod, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
+func (s *execSession) Wait() error {
+	if s.waitCh == nil {
+		return nil
 	}
-	signer, err := ssh.ParsePrivateKey(data)
-	if err != nil {
-		return nil, err
-	}
-	return ssh.PublicKeys(signer), nil
+	return <-s.waitCh
 }
 
-func buildHostKeyCallback() (ssh.HostKeyCallback, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		log.Printf("WARNING: could not determine home directory: %v — host key verification disabled", err)
-		return ssh.InsecureIgnoreHostKey(), nil
+func (s *execSession) Close() error {
+	if s.cmd != nil && s.cmd.Process != nil {
+		s.cmd.Process.Kill()
 	}
-
-	knownHostsPath := filepath.Join(home, ".ssh", "known_hosts")
-	if _, err := os.Stat(knownHostsPath); os.IsNotExist(err) {
-		log.Printf("WARNING: %s not found — host key verification disabled", knownHostsPath)
-		return ssh.InsecureIgnoreHostKey(), nil
-	}
-
-	callback, err := knownhosts.New(knownHostsPath)
-	if err != nil {
-		return nil, fmt.Errorf("parse known_hosts: %w", err)
-	}
-	return callback, nil
+	return nil
 }

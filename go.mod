@@ -4,9 +4,7 @@ go 1.24.0
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/kevinburke/ssh_config v1.6.0
 	github.com/modelcontextprotocol/go-sdk v1.3.1
-	golang.org/x/crypto v0.48.0
 )
 
 require (

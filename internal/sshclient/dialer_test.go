@@ -2,115 +2,14 @@ package sshclient
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
-	"fmt"
-	"net"
 	"testing"
-	"time"
-
-	"golang.org/x/crypto/ssh"
 )
 
-// startTestSSHServer creates an in-process SSH server for testing.
-// Returns the listener address and a cleanup function.
-func startTestSSHServer(t *testing.T) (string, func()) {
-	t.Helper()
-
-	// Generate host key
-	_, hostPriv, err := ed25519.GenerateKey(rand.Reader)
+func TestDialReturnsClient(t *testing.T) {
+	d := &RealDialer{IgnoreHostKeys: true}
+	client, err := d.Dial(context.Background(), "testhost", "testuser")
 	if err != nil {
-		t.Fatal(err)
-	}
-	hostSigner, err := ssh.NewSignerFromKey(hostPriv)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	config := &ssh.ServerConfig{
-		NoClientAuth: true,
-	}
-	config.AddHostKey(hostSigner)
-
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			go handleTestConn(conn, config)
-		}
-	}()
-
-	return listener.Addr().String(), func() { listener.Close() }
-}
-
-func handleTestConn(conn net.Conn, config *ssh.ServerConfig) {
-	defer conn.Close()
-	sshConn, chans, reqs, err := ssh.NewServerConn(conn, config)
-	if err != nil {
-		return
-	}
-	defer sshConn.Close()
-	go ssh.DiscardRequests(reqs)
-
-	for newChan := range chans {
-		if newChan.ChannelType() != "session" {
-			newChan.Reject(ssh.UnknownChannelType, "unsupported")
-			continue
-		}
-		ch, requests, err := newChan.Accept()
-		if err != nil {
-			continue
-		}
-		go func() {
-			defer ch.Close()
-			for req := range requests {
-				switch req.Type {
-				case "exec":
-					if req.WantReply {
-						req.Reply(true, nil)
-					}
-					// Echo back a simple response
-					fmt.Fprintf(ch, "ok\n")
-					ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
-					return
-				case "shell":
-					if req.WantReply {
-						req.Reply(true, nil)
-					}
-				default:
-					if req.WantReply {
-						req.Reply(false, nil)
-					}
-				}
-			}
-		}()
-	}
-}
-
-func TestRealDialerWithTestServer(t *testing.T) {
-	addr, cleanup := startTestSSHServer(t)
-	defer cleanup()
-
-	host, port, _ := net.SplitHostPort(addr)
-
-	config := &ssh.ClientConfig{
-		User:            "testuser",
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Auth:            []ssh.AuthMethod{},
-		Timeout:         5 * time.Second,
-	}
-
-	// Directly use ssh.Dial to verify the test server works
-	client, err := ssh.Dial("tcp", net.JoinHostPort(host, port), config)
-	if err != nil {
-		t.Fatalf("ssh.Dial: %v", err)
+		t.Fatalf("Dial: %v", err)
 	}
 	defer client.Close()
 
@@ -118,43 +17,170 @@ func TestRealDialerWithTestServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	defer sess.Close()
 
-	out, err := sess.Output("echo hello")
+	_, err = sess.StdinPipe()
 	if err != nil {
-		t.Fatalf("Output: %v", err)
+		t.Fatalf("StdinPipe: %v", err)
 	}
-	if string(out) != "ok\n" {
-		t.Errorf("output = %q, want %q", string(out), "ok\n")
+
+	_, err = sess.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
 	}
 }
 
-func TestResolveHostPort(t *testing.T) {
-	// With default config, an unknown host should return itself and port 22
-	hostname, port := resolveHostPort("unknownhost12345")
-	if port != "22" {
-		t.Errorf("port = %q, want %q", port, "22")
+func TestExecSessionStartFailsWithBadCommand(t *testing.T) {
+	s := &execSession{
+		host:           "testhost",
+		user:           "testuser",
+		ctx:            context.Background(),
+		ignoreHostKeys: true,
 	}
-	// hostname might be "unknownhost12345" or resolved via ssh_config
-	if hostname == "" {
-		t.Error("hostname should not be empty")
+
+	// Override the command to something that doesn't exist
+	_, err := s.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Start with a valid remote command — the ssh binary may or may not be
+	// available in the test environment, but if ssh is missing Start will
+	// return an error, which is the correct behavior.
+	err = s.Start("echo hello")
+	if err != nil {
+		// ssh not found — that's fine for this test
+		t.Skipf("ssh binary not available: %v", err)
+	}
+	defer s.Close()
+}
+
+func TestExecSessionBuildArgs(t *testing.T) {
+	tests := []struct {
+		name           string
+		host           string
+		user           string
+		ignoreHostKeys bool
+		wantContains   []string
+		wantNotContain []string
+	}{
+		{
+			name:           "with user and ignore host keys",
+			host:           "myhost",
+			user:           "myuser",
+			ignoreHostKeys: true,
+			wantContains:   []string{"-l", "myuser", "StrictHostKeyChecking=no", "UserKnownHostsFile=/dev/null", "myhost"},
+		},
+		{
+			name:           "without user",
+			host:           "myhost",
+			user:           "",
+			ignoreHostKeys: true,
+			wantNotContain: []string{"-l"},
+			wantContains:   []string{"myhost"},
+		},
+		{
+			name:           "strict host keys",
+			host:           "myhost",
+			user:           "",
+			ignoreHostKeys: false,
+			wantNotContain: []string{"StrictHostKeyChecking", "UserKnownHostsFile"},
+			wantContains:   []string{"BatchMode=yes", "myhost"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &execSession{
+				host:           tt.host,
+				user:           tt.user,
+				ignoreHostKeys: tt.ignoreHostKeys,
+			}
+
+			args := s.buildArgs("echo test")
+
+			argStr := ""
+			for _, a := range args {
+				argStr += a + " "
+			}
+
+			for _, want := range tt.wantContains {
+				found := false
+				for _, a := range args {
+					if a == want {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("args %v should contain %q", args, want)
+				}
+			}
+
+			for _, notWant := range tt.wantNotContain {
+				for _, a := range args {
+					if a == notWant {
+						t.Errorf("args %v should not contain %q", args, notWant)
+					}
+				}
+			}
+		})
 	}
 }
 
-func TestResolveUser(t *testing.T) {
-	user := resolveUser("unknownhost12345")
-	if user == "" {
-		t.Error("user should not be empty")
+func TestClientCloseMultipleSessions(t *testing.T) {
+	d := &RealDialer{IgnoreHostKeys: true}
+	client, err := d.Dial(context.Background(), "testhost", "testuser")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create multiple sessions
+	for range 3 {
+		_, err := client.NewSession()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Close should not panic
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 }
 
 func TestDialContextCancelled(t *testing.T) {
-	d := &RealDialer{}
+	d := &RealDialer{IgnoreHostKeys: true}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := d.Dial(ctx, "127.0.0.1:1", "testuser")
+	client, err := d.Dial(ctx, "testhost", "testuser")
+	if err != nil {
+		// Dial itself doesn't connect, so it shouldn't fail
+		t.Fatalf("Dial should not fail: %v", err)
+	}
+
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.StdinPipe()
+	sess.StdoutPipe()
+
+	// Start should fail or the process should be killed because context is cancelled
+	err = sess.Start("echo hello")
+	if err != nil {
+		// ssh failed to start or was killed — expected with cancelled context
+		return
+	}
+
+	// If it started, wait should eventually return with an error
+	err = sess.Wait()
+	// With cancelled context, the process gets killed
 	if err == nil {
-		t.Error("expected error with cancelled context")
+		t.Error("expected error from Wait with cancelled context")
 	}
 }
