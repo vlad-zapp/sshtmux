@@ -25,6 +25,7 @@ type Session struct {
 // Options configures session creation.
 type Options struct {
 	SessionName    string
+	PreCommand     string
 	InitCommands   []string
 	TmuxSocketPath string
 }
@@ -43,7 +44,7 @@ func New(ctx context.Context, dialer sshclient.Dialer, host, user string, opts O
 		client:      client,
 	}
 
-	if err := s.startTmux(ctx, opts.TmuxSocketPath); err != nil {
+	if err := s.startTmux(ctx, opts.PreCommand, opts.TmuxSocketPath); err != nil {
 		client.Close()
 		return nil, fmt.Errorf("start tmux: %w", err)
 	}
@@ -60,7 +61,7 @@ func New(ctx context.Context, dialer sshclient.Dialer, host, user string, opts O
 }
 
 // startTmux launches tmux in control mode and sets up the controller.
-func (s *Session) startTmux(ctx context.Context, tmuxSocketPath string) error {
+func (s *Session) startTmux(ctx context.Context, preCommand, tmuxSocketPath string) error {
 	sess, err := s.client.NewSession()
 	if err != nil {
 		return fmt.Errorf("new session: %w", err)
@@ -85,6 +86,11 @@ func (s *Session) startTmux(ctx context.Context, tmuxSocketPath string) error {
 		tmuxCmd += " -S " + tmux.ShellQuote(tmuxSocketPath)
 	}
 	tmuxCmd += fmt.Sprintf(" -C new-session -A -s %s", tmux.ShellQuote(s.SessionName))
+
+	// Prepend pre-command if configured (e.g. "sudo -i" to become root before tmux)
+	if preCommand != "" {
+		tmuxCmd = preCommand + "; " + tmuxCmd
+	}
 
 	if err := sess.Start(tmuxCmd); err != nil {
 		sess.Close()

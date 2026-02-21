@@ -113,6 +113,7 @@ func runDaemon(args []string) {
 		hs := cfg.HostSettings(host)
 		return session.New(ctx, dialer, host, user, session.Options{
 			SessionName:    hs.SessionName,
+			PreCommand:     hs.PreCommand,
 			InitCommands:   hs.InitCommands,
 			TmuxSocketPath: cfg.TmuxSocketPath,
 		})

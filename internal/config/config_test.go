@@ -172,6 +172,71 @@ func TestHostSettings_ExplicitEmptyInitCommands(t *testing.T) {
 	}
 }
 
+func TestHostSettings_PreCommandFallback(t *testing.T) {
+	cfg := Default()
+	cfg.PreCommand = "sudo -i"
+
+	hs := cfg.HostSettings("unknown")
+	if hs.PreCommand != "sudo -i" {
+		t.Errorf("PreCommand = %q, want %q", hs.PreCommand, "sudo -i")
+	}
+}
+
+func TestHostSettings_PreCommandOverride(t *testing.T) {
+	cfg := Default()
+	cfg.PreCommand = "sudo -i"
+	cfg.Host["myhost"] = HostConfig{
+		PreCommand: "sudo -u deploy bash",
+	}
+
+	hs := cfg.HostSettings("myhost")
+	if hs.PreCommand != "sudo -u deploy bash" {
+		t.Errorf("PreCommand = %q, want %q", hs.PreCommand, "sudo -u deploy bash")
+	}
+}
+
+func TestHostSettings_PreCommandPartialOverride(t *testing.T) {
+	cfg := Default()
+	cfg.PreCommand = "sudo -i"
+	cfg.Host["partial"] = HostConfig{
+		SessionName: "custom",
+		// PreCommand not set -> should fallback to global
+	}
+
+	hs := cfg.HostSettings("partial")
+	if hs.PreCommand != "sudo -i" {
+		t.Errorf("PreCommand = %q, want %q (should fallback to global)", hs.PreCommand, "sudo -i")
+	}
+}
+
+func TestLoadPreCommand(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := `
+pre_command = "sudo -i"
+
+[host.myserver]
+pre_command = "sudo -u app bash"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.PreCommand != "sudo -i" {
+		t.Errorf("PreCommand = %q, want %q", cfg.PreCommand, "sudo -i")
+	}
+	hc, ok := cfg.Host["myserver"]
+	if !ok {
+		t.Fatal("Host[myserver] not found")
+	}
+	if hc.PreCommand != "sudo -u app bash" {
+		t.Errorf("Host.PreCommand = %q, want %q", hc.PreCommand, "sudo -u app bash")
+	}
+}
+
 func TestDurationUnmarshal(t *testing.T) {
 	var d Duration
 	if err := d.UnmarshalText([]byte("5m")); err != nil {

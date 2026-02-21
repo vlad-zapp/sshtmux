@@ -9,8 +9,9 @@ import (
 )
 
 type HostConfig struct {
-	InitCommands  []string `toml:"init_commands"`
-	SessionName   string   `toml:"session_name"`
+	PreCommand     string   `toml:"pre_command"`
+	InitCommands   []string `toml:"init_commands"`
+	SessionName    string   `toml:"session_name"`
 	CommandTimeout Duration `toml:"command_timeout"`
 }
 
@@ -20,6 +21,7 @@ type Config struct {
 	CommandTimeout    Duration              `toml:"command_timeout"`
 	SocketPath        string                `toml:"socket_path"`
 	TmuxSocketPath    string                `toml:"tmux_socket_path"`
+	PreCommand        string                `toml:"pre_command"`
 	InitCommands      []string              `toml:"init_commands"`
 	Host              map[string]HostConfig `toml:"host"`
 }
@@ -89,10 +91,14 @@ func (c Config) HostSettings(host string) HostConfig {
 	hc, ok := c.Host[host]
 	if !ok {
 		return HostConfig{
-			InitCommands:  c.InitCommands,
-			SessionName:   c.SessionName,
+			PreCommand:     c.PreCommand,
+			InitCommands:   c.InitCommands,
+			SessionName:    c.SessionName,
 			CommandTimeout: c.CommandTimeout,
 		}
+	}
+	if hc.PreCommand == "" {
+		hc.PreCommand = c.PreCommand
 	}
 	if hc.SessionName == "" {
 		hc.SessionName = c.SessionName

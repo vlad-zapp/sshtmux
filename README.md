@@ -71,6 +71,10 @@ socket_path = "/tmp/sshtmux.sock"
 # Useful when the remote user's default tmux socket is inaccessible
 tmux_socket_path = "/tmp/my-tmux.sock"
 
+# Command to run before starting tmux (e.g. become root first)
+# The command is prepended to the tmux invocation: "sudo -i; tmux -C ..."
+pre_command = "sudo -i"
+
 # Commands to run in every new session before accepting commands
 # Runs in order, each must complete before the next starts
 init_commands = ["sudo -i"]
@@ -84,7 +88,7 @@ Per-host sections override global settings for specific hosts. Any setting not s
 [host.production]
 session_name = "prod"
 command_timeout = "2m"
-init_commands = ["sudo -u deploy bash"]
+pre_command = "sudo -u deploy bash"
 
 [host.staging]
 session_name = "staging"
@@ -103,6 +107,7 @@ Host names match the first argument to `sshtmux` (before `@`), and also match SS
 session_name = "sshtmux"
 connection_timeout = "10m"
 command_timeout = "45s"
+pre_command = "sudo -i"
 init_commands = ["export TERM=dumb"]
 
 [host.webserver]
@@ -111,7 +116,7 @@ command_timeout = "2m"
 
 [host.database]
 session_name = "db-admin"
-init_commands = ["sudo -u postgres psql"]
+pre_command = "sudo -u postgres bash"
 command_timeout = "5m"
 ```
 
@@ -124,11 +129,12 @@ command_timeout = "5m"
 | `command_timeout` | duration | `"30s"` | Maximum execution time per command |
 | `socket_path` | string | `$XDG_RUNTIME_DIR/sshtmux.sock` | Unix socket for daemon IPC |
 | `tmux_socket_path` | string | *(tmux default)* | Custom tmux socket on the remote host |
+| `pre_command` | string | *(none)* | Command to run before tmux (e.g. `"sudo -i"`) |
 | `init_commands` | string list | *(none)* | Shell commands to run when a session is first created |
 
 Duration values use Go syntax: `"30s"`, `"5m"`, `"1h30m"`, etc.
 
-Per-host sections (`[host.<name>]`) support `session_name`, `command_timeout`, and `init_commands`. Other settings are global only.
+Per-host sections (`[host.<name>]`) support `session_name`, `command_timeout`, `pre_command`, and `init_commands`. Other settings are global only.
 
 ## How it works
 
