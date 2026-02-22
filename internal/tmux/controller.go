@@ -154,7 +154,7 @@ func (c *RealController) readLoop(r io.Reader) {
 			c.deliverResponse(&CommandResult{Error: errMsg})
 
 		case MsgOutput:
-			c.log("readloop: %%output pane=%s data_len=%d", msg.PaneID, len(msg.Data))
+			c.log("readloop: %%output pane=%s data_len=%d data=%q", msg.PaneID, len(msg.Data), msg.Data)
 			select {
 			case c.outputCh <- msg.Data:
 			default:
