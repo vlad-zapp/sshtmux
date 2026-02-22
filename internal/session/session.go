@@ -87,12 +87,16 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 		return fmt.Errorf("stderr pipe: %w", err)
 	}
 
-	// Build tmux command with proper shell quoting for paths
-	tmuxCmd := "tmux"
+	// Build tmux command. Kill any existing session first to ensure a clean
+	// state, then create a new one. The old -A (attach-or-create) flag caused
+	// stale pane state to persist across reconnections.
+	tmuxBase := "tmux"
 	if tmuxSocketPath != "" {
-		tmuxCmd += " -S " + tmux.ShellQuote(tmuxSocketPath)
+		tmuxBase += " -S " + tmux.ShellQuote(tmuxSocketPath)
 	}
-	tmuxCmd += fmt.Sprintf(" -C new-session -A -s %s", tmux.ShellQuote(s.SessionName))
+	quotedName := tmux.ShellQuote(s.SessionName)
+	tmuxCmd := fmt.Sprintf("%s kill-session -t %s 2>/dev/null; %s -C new-session -s %s",
+		tmuxBase, quotedName, tmuxBase, quotedName)
 
 	if preCommand != "" {
 		// Pre-command opens a new shell (e.g. "sudo -i"), so we can't use
@@ -191,23 +195,11 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 	}
 	ctrl.SendCommand(ctx, fmt.Sprintf("set-option -p history-limit %d", historyLimit))
 
-	// Respawn the pane to get a clean shell. When reattaching to an existing
-	// tmux session (-A), the pane may have accumulated garbage from previous
-	// failed attempts or shell init prompts (e.g., SSH host key verification).
-	paneID := ctrl.PaneID()
-	vlog.Logf(ctx, "session: respawning pane %s for clean state", paneID)
-	if _, err := ctrl.SendCommand(ctx, "respawn-pane -k -t "+paneID); err != nil {
-		vlog.Logf(ctx, "session: respawn-pane failed: %v (continuing)", err)
-	}
-
-	// Wait for the new shell to start and any init scripts to run,
-	// then send Ctrl-C to dismiss any prompts (e.g., SSH host key verification
-	// triggered by shell init scripts).
+	// Wait for shell init scripts to run, then send Ctrl-C to dismiss any
+	// prompts they may produce (e.g., SSH host key verification).
 	time.Sleep(1 * time.Second)
-	ctrl.SendCommand(ctx, fmt.Sprintf("send-keys -t %s C-c C-c", paneID))
+	ctrl.SendCommand(ctx, fmt.Sprintf("send-keys -t %s C-c C-c", ctrl.PaneID()))
 	time.Sleep(200 * time.Millisecond)
-
-	// Drain any output produced by shell init / Ctrl-C.
 	drainChannel(ctrl.OutputCh())
 
 	// Combine all init commands into a single shell line sent as one send-keys.
@@ -265,10 +257,11 @@ func (s *Session) Exec(ctx context.Context, command string, timeout time.Duratio
 	return s.executor.Exec(ctx, command, timeout)
 }
 
-// Close cleans up the session.
+// Close cleans up the session, killing the remote tmux session.
 func (s *Session) Close() error {
 	if s.ctrl != nil {
-		s.ctrl.Detach()
+		// Kill the tmux session so it doesn't persist after disconnect.
+		s.ctrl.SendCommand(context.Background(), "kill-session")
 		s.ctrl.Close()
 	}
 	if s.sshSess != nil {
