@@ -31,6 +31,12 @@ func Logf(ctx context.Context, format string, args ...any) {
 	Printf(format, args...)
 }
 
+// HasWriter returns true if the context carries a per-request log writer.
+func HasWriter(ctx context.Context) bool {
+	w, ok := ctx.Value(logKey{}).(io.Writer)
+	return ok && w != nil
+}
+
 // GetEnabled returns the current verbose mode state.
 func GetEnabled() bool {
 	return enabled.Load()

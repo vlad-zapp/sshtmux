@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"strings"
@@ -79,6 +80,13 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 		return fmt.Errorf("stdout pipe: %w", err)
 	}
 
+	// Capture SSH stderr so verbose (-v) output and errors are streamed to vlog.
+	stderrR, err := sess.StderrPipe()
+	if err != nil {
+		sess.Close()
+		return fmt.Errorf("stderr pipe: %w", err)
+	}
+
 	// Build tmux command with proper shell quoting for paths
 	tmuxCmd := "tmux"
 	if tmuxSocketPath != "" {
@@ -125,6 +133,14 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 		}
 	}
 	vlog.Logf(ctx, "session: ssh process started, waiting for tmux handshake")
+
+	// Stream SSH stderr to vlog in a background goroutine.
+	go func() {
+		scanner := bufio.NewScanner(stderrR)
+		for scanner.Scan() {
+			vlog.Logf(ctx, "ssh: %s", scanner.Text())
+		}
+	}()
 
 	// Create controller
 	ctrl := tmux.NewController(stdout, stdin)

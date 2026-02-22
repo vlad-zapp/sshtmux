@@ -46,6 +46,7 @@ func (d *RealDialer) Dial(ctx context.Context, host, user string) (Client, error
 		host:           host,
 		user:           user,
 		ignoreHostKeys: d.IgnoreHostKeys,
+		verbose:        vlog.HasWriter(ctx) || vlog.GetEnabled(),
 	}, nil
 }
 
@@ -54,6 +55,7 @@ type execClient struct {
 	host           string
 	user           string
 	ignoreHostKeys bool
+	verbose        bool
 
 	mu       sync.Mutex
 	sessions []*execSession
@@ -64,6 +66,7 @@ func (c *execClient) NewSession() (Session, error) {
 		host:           c.host,
 		user:           c.user,
 		ignoreHostKeys: c.ignoreHostKeys,
+		verbose:        c.verbose,
 	}
 	c.mu.Lock()
 	c.sessions = append(c.sessions, s)
@@ -88,6 +91,7 @@ type execSession struct {
 	host           string
 	user           string
 	ignoreHostKeys bool
+	verbose        bool
 
 	cmd     *exec.Cmd
 	stdinR  *io.PipeReader
@@ -119,7 +123,7 @@ func (s *execSession) buildArgs(remoteCmd string) []string {
 	if s.ignoreHostKeys {
 		args = append(args, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null")
 	}
-	if vlog.GetEnabled() {
+	if s.verbose {
 		args = append(args, "-v")
 	}
 	if s.user != "" {
