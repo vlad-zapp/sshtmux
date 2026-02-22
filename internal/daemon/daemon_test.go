@@ -13,7 +13,7 @@ import (
 )
 
 func testFactory(ctx context.Context, host, user string) (*session.Session, error) {
-	ctrl := &noopController{paneID: "%0", alive: true}
+	ctrl := &noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)}
 	return session.NewFromController(ctrl, host, user), nil
 }
 

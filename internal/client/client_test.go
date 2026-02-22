@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,10 +17,23 @@ import (
 var _ tmux.Controller = (*noopController)(nil)
 
 type noopController struct {
-	paneID string
+	paneID   string
+	outputCh chan string
 }
 
 func (c *noopController) SendCommand(ctx context.Context, cmd string) (*tmux.CommandResult, error) {
+	// When receiving send-keys -l, simulate terminal echo by
+	// extracting the text and sending it to outputCh.
+	if strings.HasPrefix(cmd, "send-keys -l") {
+		text := extractSendKeysLiteralText(cmd)
+		if text != "" {
+			go func() { c.outputCh <- text }()
+		}
+	}
+	// Return "0" for @sshtmux-rv queries (command succeeded).
+	if strings.Contains(cmd, "@sshtmux-rv") && strings.HasPrefix(cmd, "display-message") {
+		return &tmux.CommandResult{Data: "0"}, nil
+	}
 	return &tmux.CommandResult{}, nil
 }
 func (c *noopController) SendCommandPipeline(ctx context.Context, cmds []string) ([]*tmux.CommandResult, error) {
@@ -33,14 +47,30 @@ func (c *noopController) SendCommandPipeline(ctx context.Context, cmds []string)
 	}
 	return results, nil
 }
-func (c *noopController) PaneID() string     { return c.paneID }
-func (c *noopController) SetPaneID(id string) { c.paneID = id }
-func (c *noopController) Alive() bool          { return true }
-func (c *noopController) Detach() error       { return nil }
-func (c *noopController) Close() error        { return nil }
+func (c *noopController) OutputCh() <-chan string { return c.outputCh }
+func (c *noopController) PaneID() string           { return c.paneID }
+func (c *noopController) SetPaneID(id string)      { c.paneID = id }
+func (c *noopController) Alive() bool              { return true }
+func (c *noopController) Detach() error            { return nil }
+func (c *noopController) Close() error             { return nil }
+
+// extractSendKeysLiteralText extracts the quoted text from a send-keys -l command.
+// Input format: "send-keys -l -t %0 'some text here'"
+func extractSendKeysLiteralText(cmd string) string {
+	idx := strings.IndexByte(cmd, '\'')
+	if idx < 0 {
+		return ""
+	}
+	rest := cmd[idx+1:]
+	end := strings.LastIndexByte(rest, '\'')
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
+}
 
 func testFactory(ctx context.Context, host, user string) (*session.Session, error) {
-	ctrl := &noopController{paneID: "%0"}
+	ctrl := &noopController{paneID: "%0", outputCh: make(chan string, 1024)}
 	return session.NewFromController(ctrl, host, user), nil
 }
 

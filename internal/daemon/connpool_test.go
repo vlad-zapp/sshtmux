@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -11,18 +12,25 @@ import (
 	"github.com/vlad-zapp/sshtmux/internal/tmux"
 )
 
-func mockFactory(ctrl tmux.Controller) SessionFactory {
-	return func(ctx context.Context, host, user string) (*session.Session, error) {
-		return session.NewFromController(ctrl, host, user), nil
-	}
-}
-
 type noopController struct {
-	paneID string
-	alive  bool
+	paneID   string
+	alive    bool
+	outputCh chan string
 }
 
 func (c *noopController) SendCommand(ctx context.Context, cmd string) (*tmux.CommandResult, error) {
+	// When receiving send-keys -l, simulate terminal echo by
+	// extracting the text and sending it to outputCh.
+	if strings.HasPrefix(cmd, "send-keys -l") {
+		text := extractSendKeysLiteralText(cmd)
+		if text != "" {
+			go func() { c.outputCh <- text }()
+		}
+	}
+	// Return "0" for @sshtmux-rv queries (command succeeded).
+	if strings.Contains(cmd, "@sshtmux-rv") && strings.HasPrefix(cmd, "display-message") {
+		return &tmux.CommandResult{Data: "0"}, nil
+	}
 	return &tmux.CommandResult{}, nil
 }
 func (c *noopController) SendCommandPipeline(ctx context.Context, cmds []string) ([]*tmux.CommandResult, error) {
@@ -36,17 +44,33 @@ func (c *noopController) SendCommandPipeline(ctx context.Context, cmds []string)
 	}
 	return results, nil
 }
-func (c *noopController) PaneID() string       { return c.paneID }
-func (c *noopController) SetPaneID(id string)   { c.paneID = id }
-func (c *noopController) Alive() bool             { return c.alive }
-func (c *noopController) Detach() error         { return nil }
-func (c *noopController) Close() error          { return nil }
+func (c *noopController) OutputCh() <-chan string { return c.outputCh }
+func (c *noopController) PaneID() string           { return c.paneID }
+func (c *noopController) SetPaneID(id string)      { c.paneID = id }
+func (c *noopController) Alive() bool              { return c.alive }
+func (c *noopController) Detach() error            { return nil }
+func (c *noopController) Close() error             { return nil }
+
+// extractSendKeysLiteralText extracts the quoted text from a send-keys -l command.
+// Input format: "send-keys -l -t %0 'some text here'"
+func extractSendKeysLiteralText(cmd string) string {
+	idx := strings.IndexByte(cmd, '\'')
+	if idx < 0 {
+		return ""
+	}
+	rest := cmd[idx+1:]
+	end := strings.LastIndexByte(rest, '\'')
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
+}
 
 func TestConnPoolGetAndReuse(t *testing.T) {
 	var createCount atomic.Int32
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
 		createCount.Add(1)
-		ctrl := &noopController{paneID: "%0", alive: true}
+		ctrl := &noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)}
 		return session.NewFromController(ctrl, host, user), nil
 	}
 
@@ -84,7 +108,7 @@ func TestConnPoolDifferentHosts(t *testing.T) {
 	var createCount atomic.Int32
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
 		createCount.Add(1)
-		ctrl := &noopController{paneID: "%0", alive: true}
+		ctrl := &noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)}
 		return session.NewFromController(ctrl, host, user), nil
 	}
 
@@ -109,7 +133,7 @@ func TestConnPoolConcurrentSameHost(t *testing.T) {
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
 		createCount.Add(1)
 		time.Sleep(50 * time.Millisecond) // Simulate slow connection
-		ctrl := &noopController{paneID: "%0", alive: true}
+		ctrl := &noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)}
 		return session.NewFromController(ctrl, host, user), nil
 	}
 
@@ -154,7 +178,7 @@ func TestConnPoolConcurrentSameHost(t *testing.T) {
 
 func TestConnPoolDisconnect(t *testing.T) {
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
-		ctrl := &noopController{paneID: "%0", alive: true}
+		ctrl := &noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)}
 		return session.NewFromController(ctrl, host, user), nil
 	}
 
@@ -177,7 +201,7 @@ func TestConnPoolDisconnect(t *testing.T) {
 
 func TestConnPoolDisconnectNotFound(t *testing.T) {
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
-		ctrl := &noopController{paneID: "%0", alive: true}
+		ctrl := &noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)}
 		return session.NewFromController(ctrl, host, user), nil
 	}
 
@@ -192,7 +216,7 @@ func TestConnPoolDisconnectNotFound(t *testing.T) {
 
 func TestConnPoolStatus(t *testing.T) {
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
-		ctrl := &noopController{paneID: "%0", alive: true}
+		ctrl := &noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)}
 		return session.NewFromController(ctrl, host, user), nil
 	}
 
@@ -222,7 +246,7 @@ func TestConnPoolStatus(t *testing.T) {
 
 func TestConnPoolClose(t *testing.T) {
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
-		ctrl := &noopController{paneID: "%0", alive: true}
+		ctrl := &noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)}
 		return session.NewFromController(ctrl, host, user), nil
 	}
 
@@ -244,7 +268,7 @@ func TestConnPoolConcurrentDifferentHosts(t *testing.T) {
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
 		createCount.Add(1)
 		time.Sleep(20 * time.Millisecond)
-		ctrl := &noopController{paneID: "%0", alive: true}
+		ctrl := &noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)}
 		return session.NewFromController(ctrl, host, user), nil
 	}
 
@@ -274,7 +298,7 @@ func TestConnPoolConcurrentDifferentHosts(t *testing.T) {
 
 func TestConnPoolEvictsDeadSession(t *testing.T) {
 	var createCount atomic.Int32
-	ctrl := &noopController{paneID: "%0", alive: true}
+	ctrl := &noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)}
 
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
 		createCount.Add(1)
@@ -313,7 +337,7 @@ func TestConnPoolEvictsDeadSession(t *testing.T) {
 
 func TestConnPoolReapExpired(t *testing.T) {
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
-		ctrl := &noopController{paneID: "%0", alive: true}
+		ctrl := &noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)}
 		return session.NewFromController(ctrl, host, user), nil
 	}
 
@@ -341,7 +365,7 @@ func TestConnPoolReapExpired(t *testing.T) {
 
 func TestConnPoolReapExpiredKeepsRecent(t *testing.T) {
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
-		ctrl := &noopController{paneID: "%0", alive: true}
+		ctrl := &noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)}
 		return session.NewFromController(ctrl, host, user), nil
 	}
 
@@ -364,7 +388,7 @@ func TestConnPoolGetContextCancelled(t *testing.T) {
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
 		// Simulate slow creation
 		time.Sleep(200 * time.Millisecond)
-		ctrl := &noopController{paneID: "%0", alive: true}
+		ctrl := &noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)}
 		return session.NewFromController(ctrl, host, user), nil
 	}
 
