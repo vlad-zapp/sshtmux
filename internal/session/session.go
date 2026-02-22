@@ -191,6 +191,25 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 	}
 	ctrl.SendCommand(ctx, fmt.Sprintf("set-option -p history-limit %d", historyLimit))
 
+	// Respawn the pane to get a clean shell. When reattaching to an existing
+	// tmux session (-A), the pane may have accumulated garbage from previous
+	// failed attempts or shell init prompts (e.g., SSH host key verification).
+	paneID := ctrl.PaneID()
+	vlog.Logf(ctx, "session: respawning pane %s for clean state", paneID)
+	if _, err := ctrl.SendCommand(ctx, "respawn-pane -k -t "+paneID); err != nil {
+		vlog.Logf(ctx, "session: respawn-pane failed: %v (continuing)", err)
+	}
+
+	// Wait for the new shell to start and any init scripts to run,
+	// then send Ctrl-C to dismiss any prompts (e.g., SSH host key verification
+	// triggered by shell init scripts).
+	time.Sleep(1 * time.Second)
+	ctrl.SendCommand(ctx, fmt.Sprintf("send-keys -t %s C-c C-c", paneID))
+	time.Sleep(200 * time.Millisecond)
+
+	// Drain any output produced by shell init / Ctrl-C.
+	drainChannel(ctrl.OutputCh())
+
 	// Combine all init commands into a single shell line sent as one send-keys.
 	// Sending multiple sequential send-keys can fail because the shell's line
 	// editor may flush the pty input buffer between commands, losing keystrokes.
@@ -210,11 +229,6 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 		fmt.Sprintf("export TERM=%s", term),
 	)
 	initLine := strings.Join(initParts, "; ")
-
-	// Diagnostic: capture pane content before init to see what shell state we're starting from.
-	if cp, err := ctrl.SendCommand(ctx, "capture-pane -p -t "+ctrl.PaneID()); err == nil {
-		vlog.Logf(ctx, "session: pane content before init:\n%s", cp.Data)
-	}
 
 	vlog.Logf(ctx, "session: running init: %s", initLine)
 	if err := s.executor.RunInit(ctx, initLine); err != nil {
