@@ -164,6 +164,12 @@ func (d *Daemon) handleExec(ctx context.Context, req Request) Response {
 	vlog.Logf(ctx, "daemon: session ready, executing command")
 	result, err := sess.Exec(ctx, req.Command, 0)
 	if err != nil {
+		// If the command timed out, the remote command is still running.
+		// Evict the session so the next command gets a fresh connection.
+		if ctx.Err() != nil {
+			vlog.Logf(ctx, "daemon: command timed out, evicting session for %s@%s", req.User, req.Host)
+			d.pool.Evict(req.Host, req.User)
+		}
 		return Response{Error: fmt.Sprintf("exec: %v", err)}
 	}
 

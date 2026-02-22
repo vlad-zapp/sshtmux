@@ -6,15 +6,31 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/vlad-zapp/sshtmux/internal/session"
+	"github.com/vlad-zapp/sshtmux/internal/tmux"
 )
 
 func testFactory(ctx context.Context, host, user string) (*session.Session, error) {
 	ctrl := &noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)}
 	return session.NewFromController(ctrl, host, user), nil
+}
+
+// hangingController is like noopController but never completes commands.
+// It does NOT set rvValue on Enter, so the executor polls forever until timeout.
+type hangingController struct {
+	noopController
+}
+
+func (c *hangingController) SendCommand(ctx context.Context, cmd string) (*tmux.CommandResult, error) {
+	// Handle send-keys Enter without setting rvValue (command "hangs")
+	if strings.HasPrefix(cmd, "send-keys") && strings.HasSuffix(cmd, "Enter") {
+		return &tmux.CommandResult{}, nil
+	}
+	return c.noopController.SendCommand(ctx, cmd)
 }
 
 func startTestDaemon(t *testing.T) (*Daemon, string) {
@@ -305,5 +321,102 @@ func TestDaemonVerboseReturnsLogs(t *testing.T) {
 	})
 	if resp.Logs != "" {
 		t.Errorf("non-verbose request after verbose should have no logs, got %q", resp.Logs)
+	}
+}
+
+func TestDaemonExecTimeoutEvictsSession(t *testing.T) {
+	var createCount atomic.Int32
+	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
+		createCount.Add(1)
+		ctrl := &hangingController{
+			noopController: noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)},
+		}
+		return session.NewFromController(ctrl, host, user), nil
+	}
+
+	pool := NewConnPool(factory, 5*time.Minute)
+	sockPath := filepath.Join(t.TempDir(), "test.sock")
+	d, err := NewDaemon(pool, sockPath, 500*time.Millisecond) // short timeout
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	defer d.Stop()
+	go d.Serve()
+	time.Sleep(10 * time.Millisecond)
+
+	// First exec should timeout because hangingController never completes
+	resp := sendRequest(t, sockPath, Request{
+		Type:    "exec",
+		Host:    "host1",
+		User:    "user1",
+		Command: "sleep 100",
+	})
+	if resp.Error == "" {
+		t.Fatal("expected timeout error")
+	}
+	if !strings.Contains(resp.Error, "deadline exceeded") {
+		t.Errorf("expected deadline exceeded error, got %q", resp.Error)
+	}
+
+	// Session should have been evicted from the pool
+	status := pool.Status()
+	if len(status) != 0 {
+		t.Errorf("expected 0 sessions after timeout eviction, got %d", len(status))
+	}
+
+	// Verify factory was called once for the first attempt
+	if createCount.Load() != 1 {
+		t.Errorf("createCount = %d, want 1", createCount.Load())
+	}
+}
+
+func TestDaemonExecTimeoutCreatesNewSessionOnRetry(t *testing.T) {
+	var createCount atomic.Int32
+	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
+		createCount.Add(1)
+		// First call returns a hanging controller, subsequent calls return normal
+		if createCount.Load() == 1 {
+			ctrl := &hangingController{
+				noopController: noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)},
+			}
+			return session.NewFromController(ctrl, host, user), nil
+		}
+		ctrl := &noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)}
+		return session.NewFromController(ctrl, host, user), nil
+	}
+
+	pool := NewConnPool(factory, 5*time.Minute)
+	sockPath := filepath.Join(t.TempDir(), "test.sock")
+	d, err := NewDaemon(pool, sockPath, 500*time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	defer d.Stop()
+	go d.Serve()
+	time.Sleep(10 * time.Millisecond)
+
+	// First exec times out
+	resp := sendRequest(t, sockPath, Request{
+		Type:    "exec",
+		Host:    "host1",
+		User:    "user1",
+		Command: "sleep 100",
+	})
+	if resp.Error == "" {
+		t.Fatal("expected timeout error on first exec")
+	}
+
+	// Second exec should create a new session and succeed
+	resp = sendRequest(t, sockPath, Request{
+		Type:    "exec",
+		Host:    "host1",
+		User:    "user1",
+		Command: "echo hello",
+	})
+	if resp.Error != "" {
+		t.Errorf("expected success on retry, got error: %s", resp.Error)
+	}
+	if createCount.Load() != 2 {
+		t.Errorf("createCount = %d, want 2 (new session after eviction)", createCount.Load())
 	}
 }

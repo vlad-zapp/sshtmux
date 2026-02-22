@@ -112,6 +112,21 @@ func (p *ConnPool) Get(ctx context.Context, host, user string) (*session.Session
 	}
 }
 
+// Evict removes a session from the pool and closes it asynchronously.
+// Used when a command times out and the session is in a dirty state.
+func (p *ConnPool) Evict(host, user string) {
+	key := sessionKey(host, user)
+	p.mu.Lock()
+	entry, ok := p.sessions[key]
+	if ok {
+		delete(p.sessions, key)
+	}
+	p.mu.Unlock()
+	if ok {
+		go entry.sess.Close()
+	}
+}
+
 // Disconnect removes and closes a session for the given host.
 func (p *ConnPool) Disconnect(host, user string) error {
 	key := sessionKey(host, user)

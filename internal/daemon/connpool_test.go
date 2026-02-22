@@ -419,6 +419,63 @@ func TestConnPoolGetContextCancelled(t *testing.T) {
 	}
 }
 
+func TestConnPoolEvict(t *testing.T) {
+	var createCount atomic.Int32
+	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
+		createCount.Add(1)
+		ctrl := &noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)}
+		return session.NewFromController(ctrl, host, user), nil
+	}
+
+	pool := NewConnPool(factory, 5*time.Minute)
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	// Create session
+	s1, err := pool.Get(ctx, "host1", "user1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if createCount.Load() != 1 {
+		t.Fatalf("createCount = %d, want 1", createCount.Load())
+	}
+
+	// Evict it
+	pool.Evict("host1", "user1")
+
+	// Pool should be empty
+	status := pool.Status()
+	if len(status) != 0 {
+		t.Errorf("Status has %d entries after evict, want 0", len(status))
+	}
+
+	// Next Get should create a new session
+	s2, err := pool.Get(ctx, "host1", "user1")
+	if err != nil {
+		t.Fatalf("Get after evict: %v", err)
+	}
+	if s1 == s2 {
+		t.Error("expected different session after evict")
+	}
+	if createCount.Load() != 2 {
+		t.Errorf("createCount = %d, want 2", createCount.Load())
+	}
+}
+
+func TestConnPoolEvictNotFound(t *testing.T) {
+	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
+		ctrl := &noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)}
+		return session.NewFromController(ctrl, host, user), nil
+	}
+
+	pool := NewConnPool(factory, 5*time.Minute)
+	defer pool.Close()
+
+	// Evicting non-existent host should be a no-op (no panic)
+	pool.Evict("nonexistent", "user")
+}
+
 func TestSessionKey(t *testing.T) {
 	if k := sessionKey("host1", "user1"); k != "user1@host1" {
 		t.Errorf("key = %q, want %q", k, "user1@host1")
