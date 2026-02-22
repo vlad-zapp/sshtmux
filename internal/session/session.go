@@ -102,7 +102,23 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 			sess.Close()
 			return fmt.Errorf("start ssh shell: %w", err)
 		}
+	} else {
+		vlog.Logf(ctx, "session: starting remote command: %s", tmuxCmd)
+		if err := sess.Start(tmuxCmd); err != nil {
+			sess.Close()
+			return fmt.Errorf("start tmux: %w", err)
+		}
+	}
 
+	// Stream SSH stderr to vlog immediately so debug output appears in real-time.
+	go func() {
+		scanner := bufio.NewScanner(stderrR)
+		for scanner.Scan() {
+			vlog.Logf(ctx, "ssh: %s", scanner.Text())
+		}
+	}()
+
+	if preCommand != "" {
 		vlog.Logf(ctx, "session: sending pre-command: %s", preCommand)
 		fmt.Fprintf(stdin, "%s\n", preCommand)
 
@@ -125,22 +141,8 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 
 		vlog.Logf(ctx, "session: sending tmux command: %s", tmuxCmd)
 		fmt.Fprintf(stdin, "%s\n", tmuxCmd)
-	} else {
-		vlog.Logf(ctx, "session: starting remote command: %s", tmuxCmd)
-		if err := sess.Start(tmuxCmd); err != nil {
-			sess.Close()
-			return fmt.Errorf("start tmux: %w", err)
-		}
 	}
 	vlog.Logf(ctx, "session: ssh process started, waiting for tmux handshake")
-
-	// Stream SSH stderr to vlog in a background goroutine.
-	go func() {
-		scanner := bufio.NewScanner(stderrR)
-		for scanner.Scan() {
-			vlog.Logf(ctx, "ssh: %s", scanner.Text())
-		}
-	}()
 
 	// Create controller
 	ctrl := tmux.NewController(stdout, stdin)
