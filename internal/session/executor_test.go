@@ -533,34 +533,28 @@ func TestExecConcurrentSemaphoreTimeout(t *testing.T) {
 	}
 }
 
-func TestRunInit(t *testing.T) {
+func TestRunInitStreaming(t *testing.T) {
 	mc := newMockController("%0")
+	var rvReady atomic.Bool
 	mc.responseFunc["display-message"] = func(cmd string) string {
-		if strings.Contains(cmd, "@sshtmux-done") {
-			return "1"
+		if strings.Contains(cmd, "@sshtmux-rv") && rvReady.Load() {
+			return "0"
 		}
 		return ""
 	}
+
 	exec := NewExecutor(mc, "")
 
-	ctx := context.Background()
-	if err := exec.RunInit(ctx, "sudo -i"); err != nil {
-		t.Fatalf("RunInit: %v", err)
-	}
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		mc.outputCh <- "sudo -i; tmux set-option -p @sshtmux-rv $?"
+		time.Sleep(10 * time.Millisecond)
+		mc.outputCh <- "root prompt stuff\n"
+		rvReady.Store(true)
+	}()
 
-	cmds := mc.getCommands()
-	// set-option (reset), send-keys, display-message (poll)
-	if len(cmds) < 3 {
-		t.Fatalf("got %d commands, want at least 3: %v", len(cmds), cmds)
-	}
-	if !strings.Contains(cmds[0], "@sshtmux-done 0") {
-		t.Errorf("cmd[0] = %q, want set-option reset", cmds[0])
-	}
-	if !strings.Contains(cmds[1], "sudo -i") {
-		t.Errorf("cmd[1] = %q, want to contain 'sudo -i'", cmds[1])
-	}
-	if !strings.Contains(cmds[2], "@sshtmux-done") {
-		t.Errorf("cmd[2] = %q, want display-message poll", cmds[2])
+	if err := exec.RunInit(context.Background(), "sudo -i"); err != nil {
+		t.Fatalf("RunInit: %v", err)
 	}
 }
 
@@ -575,55 +569,94 @@ func TestRunInitNoPaneID(t *testing.T) {
 	}
 }
 
-func TestRunInitSendKeysFormat(t *testing.T) {
+func TestRunInitStreamingCommandSequence(t *testing.T) {
 	mc := newMockController("%0")
+	var rvReady atomic.Bool
 	mc.responseFunc["display-message"] = func(cmd string) string {
-		if strings.Contains(cmd, "@sshtmux-done") {
-			return "1"
+		if strings.Contains(cmd, "@sshtmux-rv") && rvReady.Load() {
+			return "0"
 		}
 		return ""
 	}
+
 	exec := NewExecutor(mc, "")
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		mc.outputCh <- "export FOO=bar; tmux set-option -p @sshtmux-rv $?"
+		time.Sleep(10 * time.Millisecond)
+		rvReady.Store(true)
+	}()
 
 	if err := exec.RunInit(context.Background(), "export FOO=bar"); err != nil {
 		t.Fatalf("RunInit: %v", err)
 	}
 
 	cmds := mc.getCommands()
-	if len(cmds) < 3 {
-		t.Fatalf("got %d commands, want at least 3: %v", len(cmds), cmds)
+	// Should have: set-option (reset rv), send-keys -l, send-keys Enter, display-message
+	if len(cmds) < 4 {
+		t.Fatalf("got %d commands, want at least 4: %v", len(cmds), cmds)
 	}
-	// send-keys should contain the command and done signal
-	sendKeys := cmds[1] // set-option, send-keys, display-message
-	if !strings.Contains(sendKeys, "export FOO=bar") {
-		t.Errorf("send-keys should contain command: %q", sendKeys)
+	// First command resets rv
+	if !strings.Contains(cmds[0], "@sshtmux-rv") {
+		t.Errorf("cmd[0] = %q, want set-option rv reset", cmds[0])
 	}
-	if !strings.Contains(sendKeys, "@sshtmux-done 1") {
-		t.Errorf("send-keys should contain done signal: %q", sendKeys)
+	// Second command is send-keys -l (literal, no Enter)
+	if !strings.HasPrefix(cmds[1], "send-keys -l") {
+		t.Errorf("cmd[1] = %q, want send-keys -l prefix", cmds[1])
+	}
+	if !strings.Contains(cmds[1], "export FOO=bar") {
+		t.Errorf("cmd[1] should contain command: %q", cmds[1])
+	}
+	// Third command is send-keys Enter
+	if !strings.HasPrefix(cmds[2], "send-keys") || !strings.HasSuffix(cmds[2], "Enter") {
+		t.Errorf("cmd[2] = %q, want send-keys Enter", cmds[2])
+	}
+	// Fourth command is display-message for rv
+	if !strings.Contains(cmds[3], "@sshtmux-rv") {
+		t.Errorf("cmd[3] = %q, want display-message rv poll", cmds[3])
 	}
 }
 
-func TestRunInitUsesSocketPath(t *testing.T) {
+func TestRunInitStreamingSocketPath(t *testing.T) {
 	mc := newMockController("%0")
+	var rvReady atomic.Bool
 	mc.responseFunc["display-message"] = func(cmd string) string {
-		if strings.Contains(cmd, "@sshtmux-done") {
-			return "1"
+		if strings.Contains(cmd, "@sshtmux-rv") && rvReady.Load() {
+			return "0"
 		}
 		return ""
 	}
+
 	exec := NewExecutor(mc, "/tmp/my-socket")
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		mc.outputCh <- "export PS1=''; tmux -S '/tmp/my-socket' set-option -p @sshtmux-rv $?"
+		time.Sleep(10 * time.Millisecond)
+		rvReady.Store(true)
+	}()
 
 	if err := exec.RunInit(context.Background(), "export PS1=''"); err != nil {
 		t.Fatalf("RunInit: %v", err)
 	}
 
 	cmds := mc.getCommands()
-	sendKeys := cmds[1]
-	if !strings.Contains(sendKeys, "tmux -S") {
-		t.Errorf("send-keys should contain 'tmux -S': %q", sendKeys)
+	// Find the send-keys -l command
+	var foundLiteral bool
+	for _, cmd := range cmds {
+		if strings.HasPrefix(cmd, "send-keys -l") {
+			foundLiteral = true
+			if !strings.Contains(cmd, "tmux -S") {
+				t.Errorf("send-keys -l should contain 'tmux -S': %q", cmd)
+			}
+			if !strings.Contains(cmd, "/tmp/my-socket") {
+				t.Errorf("send-keys -l should contain socket path: %q", cmd)
+			}
+		}
 	}
-	if !strings.Contains(sendKeys, "/tmp/my-socket") {
-		t.Errorf("send-keys should contain socket path: %q", sendKeys)
+	if !foundLiteral {
+		t.Error("expected send-keys -l command")
 	}
 }
 

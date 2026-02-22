@@ -57,27 +57,6 @@ func (e *Executor) tmuxCmd() string {
 	return "tmux"
 }
 
-// pollForDone polls the @sshtmux-done pane option until it equals "1".
-// Returns nil when the command is done, or an error on context cancellation.
-func (e *Executor) pollForDone(ctx context.Context, paneID string) error {
-	displayCmd := fmt.Sprintf("display-message -p -t %s '#{@sshtmux-done}'", paneID)
-	for {
-		result, err := e.ctrl.SendCommand(ctx, displayCmd)
-		if err != nil {
-			return err
-		}
-		if strings.TrimSpace(result.Data) == "1" {
-			return nil
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(pollInterval):
-		}
-	}
-}
-
 // Exec executes a command in the tmux pane and returns the output + exit code.
 // Uses two-phase send (literal + Enter) with %output streaming for output capture.
 //
@@ -169,8 +148,10 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 // initTimeout is the per-command timeout for init commands.
 const initTimeout = 10 * time.Second
 
-// RunInit executes an init command using pane option polling.
-// No output capture is needed for init commands.
+// RunInit executes an init command using two-phase send with streaming.
+// Uses the same flow as Exec but discards all output.
+//
+// Flow: reset rv → drain stale → send-keys -l → consume echo → send Enter → poll rv
 func (e *Executor) RunInit(ctx context.Context, command string) error {
 	select {
 	case e.sem <- struct{}{}:
@@ -184,51 +165,57 @@ func (e *Executor) RunInit(ctx context.Context, command string) error {
 		return fmt.Errorf("pane ID not set")
 	}
 
-	tag := fmt.Sprintf("__sshtmux_%d", e.counter.Add(1))
+	outputCh := e.ctrl.OutputCh()
+	tag := fmt.Sprintf("init_%d", e.counter.Add(1))
 	vlog.Logf(ctx, "init: running %q tag=%s pane=%s", command, tag, paneID)
 
-	// Reset the done marker.
-	if _, err := e.ctrl.SendCommand(ctx, fmt.Sprintf("set-option -p -t %s @sshtmux-done 0", paneID)); err != nil {
-		return fmt.Errorf("reset done marker: %w", err)
+	// Reset rv.
+	if _, err := e.ctrl.SendCommand(ctx, fmt.Sprintf("set-option -p -t %s @sshtmux-rv ''", paneID)); err != nil {
+		return fmt.Errorf("reset rv: %w", err)
 	}
 
-	// Send command with completion signal.
+	drainChannel(outputCh)
+
+	// Type command (no Enter).
 	tmuxBin := e.tmuxCmd()
-	shellLine := fmt.Sprintf("%s; %s set-option -p @sshtmux-done 1", command, tmuxBin)
-	sendCmd := tmux.FormatSendKeys(paneID, shellLine)
-
-	vlog.Logf(ctx, "init: sending send-keys")
-	if _, err := e.ctrl.SendCommand(ctx, sendCmd); err != nil {
-		return fmt.Errorf("send-keys init: %w", err)
+	shellLine := fmt.Sprintf("%s; %s set-option -p @sshtmux-rv $?", command, tmuxBin)
+	sendLiteral := tmux.FormatSendKeysLiteral(paneID, shellLine)
+	if _, err := e.ctrl.SendCommand(ctx, sendLiteral); err != nil {
+		return fmt.Errorf("send-keys literal: %w", err)
 	}
 
-	// Poll for completion with per-init timeout.
+	// Consume echo with init timeout.
 	initCtx, cancel := context.WithTimeout(ctx, initTimeout)
 	defer cancel()
 
-	vlog.Logf(ctx, "init: polling for completion")
-	if err := e.pollForDone(initCtx, paneID); err != nil {
-		e.captureInitDiagnostics(ctx, paneID, command)
-		return fmt.Errorf("poll init completion: %w", err)
+	if err := consumeEcho(initCtx, outputCh, echoTail); err != nil {
+		return fmt.Errorf("consume echo: %w", err)
 	}
 
-	vlog.Logf(ctx, "init: %q done", command)
-	return nil
-}
-
-// captureInitDiagnostics captures the pane content after an init command fails,
-// helping diagnose why the shell didn't execute the completion signal.
-func (e *Executor) captureInitDiagnostics(ctx context.Context, paneID, command string) {
-	diagCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	captureCmd := fmt.Sprintf("capture-pane -p -J -S - -t %s", paneID)
-	result, err := e.ctrl.SendCommand(diagCtx, captureCmd)
-	if err != nil {
-		vlog.Logf(ctx, "init: FAILED %q (could not capture pane: %v)", command, err)
-		return
+	// Press Enter.
+	if _, err := e.ctrl.SendCommand(ctx, tmux.FormatSendKeysEnter(paneID)); err != nil {
+		return fmt.Errorf("send-keys enter: %w", err)
 	}
-	vlog.Logf(ctx, "init: FAILED %q — pane content:\n%s", command, result.Data)
+
+	// Poll rv until non-empty.
+	displayCmd := fmt.Sprintf("display-message -p -t %s '#{@sshtmux-rv}'", paneID)
+	for {
+		result, err := e.ctrl.SendCommand(initCtx, displayCmd)
+		if err != nil {
+			return fmt.Errorf("poll init rv: %w", err)
+		}
+		if strings.TrimSpace(result.Data) != "" {
+			drainChannel(outputCh)
+			vlog.Logf(ctx, "init: %q done", command)
+			return nil
+		}
+		drainChannel(outputCh)
+		select {
+		case <-initCtx.Done():
+			return fmt.Errorf("init timeout: %w", initCtx.Err())
+		case <-time.After(pollInterval):
+		}
+	}
 }
 
 // ansiRegex matches ANSI escape sequences:
