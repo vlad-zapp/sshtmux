@@ -172,6 +172,22 @@ func TestFormatSendKeysWithSingleQuotes(t *testing.T) {
 	}
 }
 
+func TestFormatSendKeysLiteral(t *testing.T) {
+	got := FormatSendKeysLiteral("%0", "echo hello")
+	want := "send-keys -l -t %0 'echo hello'"
+	if got != want {
+		t.Errorf("FormatSendKeysLiteral = %q, want %q", got, want)
+	}
+}
+
+func TestFormatSendKeysEnter(t *testing.T) {
+	got := FormatSendKeysEnter("%0")
+	want := "send-keys -t %0 Enter"
+	if got != want {
+		t.Errorf("FormatSendKeysEnter = %q, want %q", got, want)
+	}
+}
+
 func TestShellQuote(t *testing.T) {
 	tests := []struct {
 		input string

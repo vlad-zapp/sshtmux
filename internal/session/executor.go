@@ -27,10 +27,9 @@ const pollInterval = 200 * time.Millisecond
 // "tmux set-option ..." and "tmux -S '/path' set-option ..." forms.
 const echoTail = "set-option -p @sshtmux-rv $?"
 
-// Executor runs commands via tmux pane option polling for synchronization.
-// Instead of wait-for (which blocks the control connection and breaks some
-// tmux versions), we set a pane option when the command finishes and poll
-// for it via display-message.
+// Executor runs commands via two-phase send with %output streaming.
+// Types the command (no Enter) via send-keys -l, consumes the terminal echo,
+// presses Enter, then collects output from %output while polling @sshtmux-rv.
 type Executor struct {
 	ctrl       tmux.Controller
 	counter    atomic.Int64

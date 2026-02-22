@@ -20,10 +20,10 @@ type Controller interface {
 	// SendCommand sends a tmux command and waits for %begin/%end or %error response.
 	SendCommand(ctx context.Context, cmd string) (*CommandResult, error)
 	// SendCommandPipeline sends multiple commands in a single write and returns
-	// responses in order. This eliminates SSH round-trip gaps between commands,
-	// preventing race conditions (e.g., wait-for signal arriving before the
-	// wait-for command is processed by tmux).
+	// responses in order. This eliminates SSH round-trip gaps between commands.
 	SendCommandPipeline(ctx context.Context, cmds []string) ([]*CommandResult, error)
+	// OutputCh returns a read-only channel that receives %output pane data.
+	OutputCh() <-chan string
 	// PaneID returns the ID of the session's pane (e.g., "%0").
 	PaneID() string
 	// SetPaneID sets the pane ID (discovered from initial output).
@@ -50,6 +50,9 @@ type RealController struct {
 	queue   []chan commandResponse
 	queueMu sync.Mutex
 
+	// outputCh receives parsed %output pane data from the readLoop.
+	outputCh chan string
+
 	// startup is closed after the initial %begin/%end pair from tmux is consumed.
 	startup     chan struct{}
 	startupOnce sync.Once
@@ -72,9 +75,10 @@ type commandResponse struct {
 // The caller must call Close() when done.
 func NewController(r io.Reader, w io.Writer) *RealController {
 	c := &RealController{
-		w:       w,
-		startup: make(chan struct{}),
-		done:    make(chan struct{}),
+		w:        w,
+		outputCh: make(chan string, 1024),
+		startup:  make(chan struct{}),
+		done:     make(chan struct{}),
 	}
 	go c.readLoop(r)
 	return c
@@ -90,6 +94,11 @@ func (c *RealController) log(format string, args ...any) {
 	if f := c.logFunc; f != nil {
 		f(format, args...)
 	}
+}
+
+// OutputCh returns a read-only channel that receives %output pane data.
+func (c *RealController) OutputCh() <-chan string {
+	return c.outputCh
 }
 
 // WaitStartup blocks until the initial tmux %begin/%end handshake is consumed.
@@ -112,7 +121,6 @@ func (c *RealController) readLoop(r io.Reader) {
 
 	var currentData []string
 	inResponse := false
-	outputCount := 0
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -129,10 +137,6 @@ func (c *RealController) readLoop(r io.Reader) {
 
 		switch msg.Type {
 		case MsgBegin:
-			if outputCount > 0 {
-				c.log("readloop: %d %%output notifications since last command", outputCount)
-				outputCount = 0
-			}
 			c.log("readloop: %%begin cmd=%d", msg.CmdNum)
 			currentData = nil
 			inResponse = true
@@ -150,7 +154,11 @@ func (c *RealController) readLoop(r io.Reader) {
 			c.deliverResponse(&CommandResult{Error: errMsg})
 
 		case MsgOutput:
-			outputCount++
+			select {
+			case c.outputCh <- msg.Data:
+			default:
+				c.log("readloop: output channel full, dropping data")
+			}
 		}
 	}
 

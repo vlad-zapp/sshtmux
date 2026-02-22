@@ -167,7 +167,7 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 		return fmt.Errorf("disable mouse: %w", err)
 	}
 
-	// Set scrollback buffer so capture-pane can retrieve all output.
+	// Set scrollback buffer for the pane.
 	historyLimit := opts.HistoryLimit
 	if historyLimit <= 0 {
 		historyLimit = 50000
@@ -197,17 +197,6 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 	if err := s.executor.RunInit(ctx, initLine); err != nil {
 		return fmt.Errorf("init: %w", err)
 	}
-
-	// Verify control connection is still responsive after init.
-	// The init pipeline uses wait-for which could leave tmux in a bad state
-	// on some versions.
-	vlog.Logf(ctx, "session: verifying control connection after init")
-	verifyCtx, verifyCancel := context.WithTimeout(ctx, 5*time.Second)
-	defer verifyCancel()
-	if _, err := ctrl.SendCommand(verifyCtx, "display-message -p ok"); err != nil {
-		return fmt.Errorf("post-init verify: control connection unresponsive: %w", err)
-	}
-	vlog.Logf(ctx, "session: control connection verified")
 
 	return nil
 }

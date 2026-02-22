@@ -125,6 +125,16 @@ func FormatSendKeys(target, text string) string {
 	return fmt.Sprintf("send-keys -t %s %s Enter", target, ShellQuote(text))
 }
 
+// FormatSendKeysLiteral formats a send-keys command with -l (literal, no Enter).
+func FormatSendKeysLiteral(target, text string) string {
+	return fmt.Sprintf("send-keys -l -t %s %s", target, ShellQuote(text))
+}
+
+// FormatSendKeysEnter formats a send-keys command that presses Enter.
+func FormatSendKeysEnter(target string) string {
+	return fmt.Sprintf("send-keys -t %s Enter", target)
+}
+
 // ShellQuote quotes a string for tmux/shell command arguments.
 func ShellQuote(s string) string {
 	// Use single quotes, escaping any existing single quotes

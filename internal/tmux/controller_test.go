@@ -303,12 +303,51 @@ func TestControllerPaneIDConcurrent(t *testing.T) {
 	}
 }
 
+func TestControllerOutputChannel(t *testing.T) {
+	_, cmdW := io.Pipe()
+	respR, respW := io.Pipe()
+
+	// Send two %output notifications, then close.
+	go func() {
+		fmt.Fprintf(respW, "%%output %%0 hello\\012\n")
+		fmt.Fprintf(respW, "%%output %%0 world\\012\n")
+		respW.Close()
+	}()
+
+	ctrl := NewController(respR, cmdW)
+	defer cmdW.Close()
+
+	// Read the two messages from OutputCh.
+	timeout := time.After(2 * time.Second)
+
+	select {
+	case data := <-ctrl.OutputCh():
+		if data != "hello\n" {
+			t.Errorf("first output = %q, want %q", data, "hello\n")
+		}
+	case <-timeout:
+		t.Fatal("timed out waiting for first output")
+	}
+
+	select {
+	case data := <-ctrl.OutputCh():
+		if data != "world\n" {
+			t.Errorf("second output = %q, want %q", data, "world\n")
+		}
+	case <-timeout:
+		t.Fatal("timed out waiting for second output")
+	}
+
+	// Wait for readLoop to finish.
+	<-ctrl.done
+}
+
 func TestControllerHighVolumeOutput(t *testing.T) {
 	_, cmdW := io.Pipe()
 	respR, respW := io.Pipe()
 
-	// Send many %output notifications. readLoop should not deadlock
-	// since it just ignores them now (no channel to fill).
+	// Send many %output notifications. readLoop should not deadlock;
+	// excess output beyond the 1024-buffer channel is dropped.
 	go func() {
 		for i := range 5000 {
 			fmt.Fprintf(respW, "%%output %%0 line-%d\\012\n", i)
@@ -320,6 +359,29 @@ func TestControllerHighVolumeOutput(t *testing.T) {
 	defer cmdW.Close()
 
 	<-ctrl.done
+
+	// Drain whatever is in the channel. We should have at most 1024 items
+	// (the channel buffer size) since no reader was actively consuming.
+	count := 0
+	for {
+		select {
+		case _, ok := <-ctrl.OutputCh():
+			if !ok {
+				goto done
+			}
+			count++
+		default:
+			goto done
+		}
+	}
+done:
+	if count > 1024 {
+		t.Errorf("got %d items from output channel, expected at most 1024", count)
+	}
+	if count == 0 {
+		t.Error("expected at least some items in output channel")
+	}
+	t.Logf("received %d of 5000 output items (channel buffer=1024)", count)
 }
 
 func TestControllerMultilineData(t *testing.T) {
