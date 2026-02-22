@@ -210,6 +210,12 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 		fmt.Sprintf("export TERM=%s", term),
 	)
 	initLine := strings.Join(initParts, "; ")
+
+	// Diagnostic: capture pane content before init to see what shell state we're starting from.
+	if cp, err := ctrl.SendCommand(ctx, "capture-pane -p -t "+ctrl.PaneID()); err == nil {
+		vlog.Logf(ctx, "session: pane content before init:\n%s", cp.Data)
+	}
+
 	vlog.Logf(ctx, "session: running init: %s", initLine)
 	if err := s.executor.RunInit(ctx, initLine); err != nil {
 		return fmt.Errorf("init: %w", err)
