@@ -102,7 +102,7 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 	}
 
 	// Consume echo.
-	if err := consumeEcho(ctx, outputCh, echoTail); err != nil {
+	if err := consumeEcho(ctx, ctx, outputCh, echoTail); err != nil {
 		return nil, fmt.Errorf("consume echo: %w", err)
 	}
 
@@ -167,7 +167,7 @@ func (e *Executor) RunInit(ctx context.Context, command string) error {
 
 	outputCh := e.ctrl.OutputCh()
 	tag := fmt.Sprintf("init_%d", e.counter.Add(1))
-	vlog.Logf(ctx, "init: running %q tag=%s pane=%s", command, tag, paneID)
+	vlog.Logf(ctx, "init: running %q tag=%s pane=%s socket=%q", command, tag, paneID, e.SocketPath)
 
 	initCtx, cancel := context.WithTimeout(ctx, initTimeout)
 	defer cancel()
@@ -175,26 +175,33 @@ func (e *Executor) RunInit(ctx context.Context, command string) error {
 	drainChannel(outputCh)
 
 	// Unset completion indicator.
-	if _, err := e.ctrl.SendCommand(initCtx, "set-option -pu -t "+paneID+" @sshtmux-rv"); err != nil {
+	unsetCmd := "set-option -pu -t " + paneID + " @sshtmux-rv"
+	vlog.Logf(ctx, "init[%s]: step=unset cmd=%q", tag, unsetCmd)
+	if _, err := e.ctrl.SendCommand(initCtx, unsetCmd); err != nil {
 		return fmt.Errorf("unset @sshtmux-rv: %w", err)
 	}
+	vlog.Logf(ctx, "init[%s]: step=unset done", tag)
 
 	// Type command with completion signal (no Enter).
 	shellLine := command + "; " + e.tmuxCmd() + " set-option -p -t " + paneID + " @sshtmux-rv 0"
 	sendLiteral := tmux.FormatSendKeysLiteral(paneID, shellLine)
+	vlog.Logf(ctx, "init[%s]: step=send-keys-l shell_line=%q", tag, shellLine)
 	if _, err := e.ctrl.SendCommand(initCtx, sendLiteral); err != nil {
 		return fmt.Errorf("send-keys literal: %w", err)
 	}
+	vlog.Logf(ctx, "init[%s]: step=send-keys-l done, waiting for echo tail=%q", tag, echoTail)
 
 	// Consume echo.
-	if err := consumeEcho(initCtx, outputCh, echoTail); err != nil {
+	if err := consumeEcho(ctx, initCtx, outputCh, echoTail); err != nil {
 		return fmt.Errorf("consume echo: %w", err)
 	}
+	vlog.Logf(ctx, "init[%s]: step=echo-consumed", tag)
 
 	// Press Enter.
 	if _, err := e.ctrl.SendCommand(initCtx, tmux.FormatSendKeysEnter(paneID)); err != nil {
 		return fmt.Errorf("send-keys enter: %w", err)
 	}
+	vlog.Logf(ctx, "init[%s]: step=enter-sent, polling every %v", tag, e.pollInterval())
 
 	// Poll for completion.
 	pollCmd := "display-message -p -t " + paneID + " '#{@sshtmux-rv}'"
@@ -202,10 +209,12 @@ func (e *Executor) RunInit(ctx context.Context, command string) error {
 	defer ticker.Stop()
 
 	var buf strings.Builder
+	pollCount := 0
 	for {
 		select {
 		case <-initCtx.Done():
 			received := buf.String()
+			vlog.Logf(ctx, "init[%s]: TIMEOUT after %d polls, output=%q", tag, pollCount, received)
 			if received != "" {
 				return fmt.Errorf("init timeout (output: %q): %w", received, initCtx.Err())
 			}
@@ -213,11 +222,13 @@ func (e *Executor) RunInit(ctx context.Context, command string) error {
 		case data := <-outputCh:
 			buf.WriteString(data)
 		case <-ticker.C:
+			pollCount++
 			result, err := e.ctrl.SendCommand(initCtx, pollCmd)
 			if err != nil {
 				return fmt.Errorf("poll @sshtmux-rv: %w", err)
 			}
 			val := strings.TrimSpace(result.Data)
+			vlog.Logf(ctx, "init[%s]: poll #%d rv=%q", tag, pollCount, val)
 			if val != "" {
 				drainChannel(outputCh)
 				vlog.Logf(ctx, "init: %q done", command)
@@ -240,12 +251,13 @@ func StripANSI(s string) string {
 }
 
 // consumeEcho reads from outputCh until the accumulated data contains the tail string.
-func consumeEcho(ctx context.Context, ch <-chan string, tail string) error {
+func consumeEcho(logCtx, waitCtx context.Context, ch <-chan string, tail string) error {
 	var buf strings.Builder
 	for {
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-waitCtx.Done():
+			vlog.Logf(logCtx, "consumeEcho: TIMEOUT waiting for %q, accumulated=%q", tail, buf.String())
+			return waitCtx.Err()
 		case data := <-ch:
 			buf.WriteString(data)
 			if strings.Contains(buf.String(), tail) {
