@@ -174,7 +174,7 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 	initParts = append(initParts,
 		"unset HISTFILE 2>/dev/null",
 		"set +o history 2>/dev/null",
-		"export PS1=''",
+		`export PS1=""`,
 		fmt.Sprintf("export TERM=%s", term),
 	)
 	initLine := strings.Join(initParts, "; ")

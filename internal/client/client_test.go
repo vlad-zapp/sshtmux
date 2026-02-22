@@ -19,9 +19,19 @@ var _ tmux.Controller = (*noopController)(nil)
 type noopController struct {
 	paneID   string
 	outputCh chan string
+	rvValue  string
 }
 
 func (c *noopController) SendCommand(ctx context.Context, cmd string) (*tmux.CommandResult, error) {
+	// Handle @sshtmux-rv unset
+	if strings.Contains(cmd, "set-option -pu") && strings.Contains(cmd, "@sshtmux-rv") {
+		c.rvValue = ""
+		return &tmux.CommandResult{}, nil
+	}
+	// Handle @sshtmux-rv poll
+	if strings.Contains(cmd, "display-message") && strings.Contains(cmd, "@sshtmux-rv") {
+		return &tmux.CommandResult{Data: c.rvValue}, nil
+	}
 	// When receiving send-keys -l, simulate terminal echo by
 	// extracting the text and sending it to outputCh.
 	if strings.HasPrefix(cmd, "send-keys -l") {
@@ -30,8 +40,8 @@ func (c *noopController) SendCommand(ctx context.Context, cmd string) (*tmux.Com
 			go func() { c.outputCh <- text }()
 		}
 	} else if strings.HasPrefix(cmd, "send-keys") && strings.HasSuffix(cmd, "Enter") {
-		// Simulate command completion by sending done marker.
-		go func() { c.outputCh <- "\n__SSHTMUX_DONE_0__\n" }()
+		// Simulate instant command completion via pane option.
+		c.rvValue = "0"
 	}
 	return &tmux.CommandResult{}, nil
 }

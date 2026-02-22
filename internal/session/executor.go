@@ -20,20 +20,20 @@ type ExecResult struct {
 }
 
 // echoTail is the suffix we look for in %output to detect the echoed command line.
-// Both Exec and RunInit append a completion marker containing this prefix.
-const echoTail = "__SSHTMUX_DONE_"
+const echoTail = "@sshtmux-rv"
 
-// donePattern matches the completion marker in command output after Enter.
-// The captured group is the exit code.
-var donePattern = regexp.MustCompile(`__SSHTMUX_DONE_(\d+)__`)
+// defaultPollInterval is the default interval for checking command completion.
+const defaultPollInterval = 200 * time.Millisecond
 
 // Executor runs commands via two-phase send with %output streaming.
 // Types the command (no Enter) via send-keys -l, consumes the terminal echo,
-// presses Enter, then collects output from %output until a completion marker appears.
+// presses Enter, then polls @sshtmux-rv pane option for completion while
+// collecting output from %output.
 type Executor struct {
-	ctrl    tmux.Controller
-	counter atomic.Int64
-	sem     chan struct{} // size 1, serializes Exec/RunInit on this session
+	ctrl         tmux.Controller
+	counter      atomic.Int64
+	sem          chan struct{}    // size 1, serializes Exec/RunInit on this session
+	PollInterval time.Duration   // how often to check @sshtmux-rv; 0 = default (200ms)
 }
 
 // NewExecutor creates a new executor using the given tmux controller.
@@ -41,10 +41,18 @@ func NewExecutor(ctrl tmux.Controller) *Executor {
 	return &Executor{ctrl: ctrl, sem: make(chan struct{}, 1)}
 }
 
+func (e *Executor) pollInterval() time.Duration {
+	if e.PollInterval > 0 {
+		return e.PollInterval
+	}
+	return defaultPollInterval
+}
+
 // Exec executes a command in the tmux pane and returns the output + exit code.
-// Uses two-phase send (literal + Enter) with %output streaming for output capture.
+// Uses two-phase send (literal + Enter) with %output streaming for output capture
+// and @sshtmux-rv pane option polling for completion detection.
 //
-// Flow: drain stale → send-keys -l → consume echo → send Enter → collect output until marker
+// Flow: drain stale -> unset @sshtmux-rv -> send-keys -l -> consume echo -> send Enter -> poll + collect output
 func (e *Executor) Exec(ctx context.Context, command string, timeout time.Duration) (*ExecResult, error) {
 	if timeout > 0 {
 		var cancel context.CancelFunc
@@ -71,8 +79,15 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 	// Drain stale %output.
 	drainChannel(outputCh)
 
-	// Type command with completion marker (no Enter).
-	shellLine := command + `; __e=$?; printf '\n__SSHTMUX_DONE_%d__\n' "$__e"`
+	// Unset completion indicator before starting.
+	if _, err := e.ctrl.SendCommand(ctx, "set-option -pu -t "+paneID+" @sshtmux-rv"); err != nil {
+		return nil, fmt.Errorf("unset @sshtmux-rv: %w", err)
+	}
+
+	// Type command with completion signal (no Enter).
+	// After the command runs, tmux set-option sets @sshtmux-rv to the exit code.
+	// Uses ${TMUX%%,*} to extract the socket path from the $TMUX env var.
+	shellLine := command + `; tmux -S "${TMUX%%,*}" set-option -p -t ` + paneID + ` @sshtmux-rv $?`
 	sendLiteral := tmux.FormatSendKeysLiteral(paneID, shellLine)
 	if _, err := e.ctrl.SendCommand(ctx, sendLiteral); err != nil {
 		return nil, fmt.Errorf("send-keys literal: %w", err)
@@ -84,23 +99,37 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 	}
 
 	// Press Enter.
-	sendEnter := tmux.FormatSendKeysEnter(paneID)
-	if _, err := e.ctrl.SendCommand(ctx, sendEnter); err != nil {
+	if _, err := e.ctrl.SendCommand(ctx, tmux.FormatSendKeysEnter(paneID)); err != nil {
 		return nil, fmt.Errorf("send-keys enter: %w", err)
 	}
 
-	// Collect output until completion marker appears.
+	// Poll for completion while collecting output.
+	pollCmd := "display-message -p -t " + paneID + " '#{@sshtmux-rv}'"
+	ticker := time.NewTicker(e.pollInterval())
+	defer ticker.Stop()
+
 	var output strings.Builder
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("waiting for completion: %w", ctx.Err())
+			received := output.String()
+			if received != "" {
+				return nil, fmt.Errorf("waiting for completion (output: %q): %w", received, ctx.Err())
+			}
+			return nil, fmt.Errorf("waiting for completion (no output received): %w", ctx.Err())
 		case data := <-outputCh:
 			output.WriteString(data)
-			accumulated := output.String()
-			if loc := donePattern.FindStringSubmatchIndex(accumulated); loc != nil {
-				exitCode, _ := strconv.Atoi(accumulated[loc[2]:loc[3]])
-				rawOutput := strings.TrimRight(accumulated[:loc[0]], "\n")
+		case <-ticker.C:
+			result, err := e.ctrl.SendCommand(ctx, pollCmd)
+			if err != nil {
+				return nil, fmt.Errorf("poll @sshtmux-rv: %w", err)
+			}
+			val := strings.TrimSpace(result.Data)
+			if val != "" {
+				exitCode, _ := strconv.Atoi(val)
+				// Collect any remaining buffered output.
+				collectRemaining(outputCh, &output)
+				rawOutput := strings.TrimRight(output.String(), "\n")
 				vlog.Logf(ctx, "exec: done exit_code=%d output_len=%d", exitCode, len(rawOutput))
 				return &ExecResult{Output: rawOutput, ExitCode: exitCode}, nil
 			}
@@ -114,7 +143,7 @@ const initTimeout = 10 * time.Second
 // RunInit executes an init command using two-phase send with streaming.
 // Uses the same flow as Exec but discards output and doesn't capture exit code.
 //
-// Flow: drain stale → send-keys -l → consume echo → send Enter → wait for marker
+// Flow: drain stale -> unset @sshtmux-rv -> send-keys -l -> consume echo -> send Enter -> poll for completion
 func (e *Executor) RunInit(ctx context.Context, command string) error {
 	select {
 	case e.sem <- struct{}{}:
@@ -137,8 +166,13 @@ func (e *Executor) RunInit(ctx context.Context, command string) error {
 
 	drainChannel(outputCh)
 
-	// Type command with completion marker (no Enter).
-	shellLine := command + `; printf '\n__SSHTMUX_DONE_0__\n'`
+	// Unset completion indicator.
+	if _, err := e.ctrl.SendCommand(initCtx, "set-option -pu -t "+paneID+" @sshtmux-rv"); err != nil {
+		return fmt.Errorf("unset @sshtmux-rv: %w", err)
+	}
+
+	// Type command with completion signal (no Enter).
+	shellLine := command + `; tmux -S "${TMUX%%,*}" set-option -p -t ` + paneID + ` @sshtmux-rv 0`
 	sendLiteral := tmux.FormatSendKeysLiteral(paneID, shellLine)
 	if _, err := e.ctrl.SendCommand(initCtx, sendLiteral); err != nil {
 		return fmt.Errorf("send-keys literal: %w", err)
@@ -154,15 +188,29 @@ func (e *Executor) RunInit(ctx context.Context, command string) error {
 		return fmt.Errorf("send-keys enter: %w", err)
 	}
 
-	// Wait for completion marker.
+	// Poll for completion.
+	pollCmd := "display-message -p -t " + paneID + " '#{@sshtmux-rv}'"
+	ticker := time.NewTicker(e.pollInterval())
+	defer ticker.Stop()
+
 	var buf strings.Builder
 	for {
 		select {
 		case <-initCtx.Done():
-			return fmt.Errorf("init timeout: %w", initCtx.Err())
+			received := buf.String()
+			if received != "" {
+				return fmt.Errorf("init timeout (output: %q): %w", received, initCtx.Err())
+			}
+			return fmt.Errorf("init timeout (no output received): %w", initCtx.Err())
 		case data := <-outputCh:
 			buf.WriteString(data)
-			if strings.Contains(buf.String(), echoTail) {
+		case <-ticker.C:
+			result, err := e.ctrl.SendCommand(initCtx, pollCmd)
+			if err != nil {
+				return fmt.Errorf("poll @sshtmux-rv: %w", err)
+			}
+			val := strings.TrimSpace(result.Data)
+			if val != "" {
 				drainChannel(outputCh)
 				vlog.Logf(ctx, "init: %q done", command)
 				return nil
@@ -204,6 +252,18 @@ func drainChannel(ch <-chan string) {
 	for {
 		select {
 		case <-ch:
+		default:
+			return
+		}
+	}
+}
+
+// collectRemaining reads all currently buffered data from the channel into the builder.
+func collectRemaining(ch <-chan string, buf *strings.Builder) {
+	for {
+		select {
+		case data := <-ch:
+			buf.WriteString(data)
 		default:
 			return
 		}

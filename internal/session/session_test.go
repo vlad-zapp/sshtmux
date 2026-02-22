@@ -28,10 +28,10 @@ func TestSessionExec(t *testing.T) {
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		mc.outputCh <- `echo hello; __e=$?; printf '\n__SSHTMUX_DONE_%d__\n' "$__e"`
+		mc.outputCh <- echoForExec("echo hello")
 		time.Sleep(10 * time.Millisecond)
 		mc.outputCh <- "hello\n"
-		mc.outputCh <- "\n__SSHTMUX_DONE_0__\n"
+		mc.setRV("0")
 	}()
 
 	ctx := context.Background()
@@ -111,10 +111,10 @@ func TestSessionExecTimeout(t *testing.T) {
 	mc := newMockController("%0")
 	sess := NewFromController(mc, "testhost", "testuser")
 
-	// Send echo so we get past echo phase, but marker never arrives
+	// Send echo so we get past echo phase, but rv never set
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		mc.outputCh <- `sleep 100; __e=$?; printf '\n__SSHTMUX_DONE_%d__\n' "$__e"`
+		mc.outputCh <- echoForExec("sleep 100")
 	}()
 
 	ctx := context.Background()

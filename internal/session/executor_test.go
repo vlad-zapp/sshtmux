@@ -27,6 +27,8 @@ type mockController struct {
 	pipelineCalls int
 	// outputCh is the channel for streaming %output data
 	outputCh chan string
+	// rvValue simulates the @sshtmux-rv pane option
+	rvValue string
 }
 
 func newMockController(paneID string) *mockController {
@@ -56,6 +58,22 @@ func (m *mockController) SendCommand(ctx context.Context, cmd string) (*tmux.Com
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
+	}
+
+	// Handle @sshtmux-rv unset
+	if strings.Contains(cmd, "set-option -pu") && strings.Contains(cmd, "@sshtmux-rv") {
+		m.mu.Lock()
+		m.rvValue = ""
+		m.mu.Unlock()
+		return &tmux.CommandResult{}, nil
+	}
+
+	// Handle @sshtmux-rv poll
+	if strings.Contains(cmd, "display-message") && strings.Contains(cmd, "@sshtmux-rv") {
+		m.mu.Lock()
+		val := m.rvValue
+		m.mu.Unlock()
+		return &tmux.CommandResult{Data: val}, nil
 	}
 
 	// Check for dynamic response function first
@@ -128,20 +146,33 @@ func (m *mockController) setResponse(prefix, data string) {
 	m.responses[prefix] = data
 }
 
+func (m *mockController) setRV(val string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rvValue = val
+}
+
+// echoForExec returns the expected echo text for a command in Exec.
+func echoForExec(cmd string) string {
+	return cmd + `; tmux -S "${TMUX%%,*}" set-option -p -t %0 @sshtmux-rv $?`
+}
+
+// echoForInit returns the expected echo text for a command in RunInit.
+func echoForInit(cmd string) string {
+	return cmd + `; tmux -S "${TMUX%%,*}" set-option -p -t %0 @sshtmux-rv 0`
+}
+
 func TestExecStreaming(t *testing.T) {
 	mc := newMockController("%0")
 	exec := NewExecutor(mc)
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		// Simulate echo from send-keys -l typing
-		mc.outputCh <- `ls -la; __e=$?; printf '\n__SSHTMUX_DONE_%d__\n' "$__e"`
+		mc.outputCh <- echoForExec("ls -la")
 		time.Sleep(10 * time.Millisecond)
-		// Simulate command output after Enter
 		mc.outputCh <- "file1.txt\n"
 		mc.outputCh <- "file2.txt\n"
-		// Completion marker from printf
-		mc.outputCh <- "\n__SSHTMUX_DONE_0__\n"
+		mc.setRV("0")
 	}()
 
 	result, err := exec.Exec(context.Background(), "ls -la", 5*time.Second)
@@ -162,9 +193,9 @@ func TestExecStreamingNoOutput(t *testing.T) {
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		mc.outputCh <- `true; __e=$?; printf '\n__SSHTMUX_DONE_%d__\n' "$__e"`
+		mc.outputCh <- echoForExec("true")
 		time.Sleep(10 * time.Millisecond)
-		mc.outputCh <- "\n__SSHTMUX_DONE_0__\n"
+		mc.setRV("0")
 	}()
 
 	result, err := exec.Exec(context.Background(), "true", 5*time.Second)
@@ -185,13 +216,13 @@ func TestExecStreamingEchoInChunks(t *testing.T) {
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		// Echo arrives in chunks
-		mc.outputCh <- "echo hello; __e=$?; "
-		mc.outputCh <- `printf '\n__SSHTMUX_DONE_`
-		mc.outputCh <- `%d__\n' "$__e"`
+		// Echo arrives in chunks, last chunk contains @sshtmux-rv
+		mc.outputCh <- "echo hello; tmux"
+		mc.outputCh <- ` -S "${TMUX%%,*}" set-option -p -t %0 `
+		mc.outputCh <- `@sshtmux-rv $?`
 		time.Sleep(10 * time.Millisecond)
 		mc.outputCh <- "hello\n"
-		mc.outputCh <- "\n__SSHTMUX_DONE_0__\n"
+		mc.setRV("0")
 	}()
 
 	result, err := exec.Exec(context.Background(), "echo hello", 5*time.Second)
@@ -209,10 +240,10 @@ func TestExecStreamingNonZeroExit(t *testing.T) {
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		mc.outputCh <- `badcmd; __e=$?; printf '\n__SSHTMUX_DONE_%d__\n' "$__e"`
+		mc.outputCh <- echoForExec("badcmd")
 		time.Sleep(10 * time.Millisecond)
 		mc.outputCh <- "bash: badcmd: command not found\n"
-		mc.outputCh <- "\n__SSHTMUX_DONE_127__\n"
+		mc.setRV("127")
 	}()
 
 	result, err := exec.Exec(context.Background(), "badcmd", 5*time.Second)
@@ -230,8 +261,8 @@ func TestExecStreamingTimeout(t *testing.T) {
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		mc.outputCh <- `sleep 100; __e=$?; printf '\n__SSHTMUX_DONE_%d__\n' "$__e"`
-		// No marker sent — simulates a command that never completes
+		mc.outputCh <- echoForExec("sleep 100")
+		// rv never set — simulates a command that never completes
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -264,10 +295,10 @@ func TestExecStreamingDrainsStaleOutput(t *testing.T) {
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		mc.outputCh <- `cmd; __e=$?; printf '\n__SSHTMUX_DONE_%d__\n' "$__e"`
+		mc.outputCh <- echoForExec("cmd")
 		time.Sleep(10 * time.Millisecond)
 		mc.outputCh <- "fresh output\n"
-		mc.outputCh <- "\n__SSHTMUX_DONE_0__\n"
+		mc.setRV("0")
 	}()
 
 	result, err := exec.Exec(context.Background(), "cmd", 5*time.Second)
@@ -288,13 +319,13 @@ func TestExecStreamingLargeOutput(t *testing.T) {
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		mc.outputCh <- `cmd; __e=$?; printf '\n__SSHTMUX_DONE_%d__\n' "$__e"`
+		mc.outputCh <- echoForExec("cmd")
 		time.Sleep(10 * time.Millisecond)
 		mc.outputCh <- "NAMESPACE   NAME        READY\n"
 		for i := range 100 {
 			mc.outputCh <- fmt.Sprintf("kube-system pod-%d      1/1\n", i)
 		}
-		mc.outputCh <- "\n__SSHTMUX_DONE_0__\n"
+		mc.setRV("0")
 	}()
 
 	result, err := exec.Exec(context.Background(), "cmd", 5*time.Second)
@@ -324,10 +355,10 @@ func TestExecContextTimeout(t *testing.T) {
 	mc := newMockController("%0")
 	exec := NewExecutor(mc)
 
-	// Send echo so we get past echo phase, but marker never arrives
+	// Send echo so we get past echo phase, but rv never set
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		mc.outputCh <- `sleep 100; __e=$?; printf '\n__SSHTMUX_DONE_%d__\n' "$__e"`
+		mc.outputCh <- echoForExec("sleep 100")
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -367,10 +398,10 @@ func TestExecCommandSequence(t *testing.T) {
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		mc.outputCh <- `echo hello; __e=$?; printf '\n__SSHTMUX_DONE_%d__\n' "$__e"`
+		mc.outputCh <- echoForExec("echo hello")
 		time.Sleep(10 * time.Millisecond)
 		mc.outputCh <- "hello\n"
-		mc.outputCh <- "\n__SSHTMUX_DONE_0__\n"
+		mc.setRV("0")
 	}()
 
 	result, err := exec.Exec(context.Background(), "echo hello", 5*time.Second)
@@ -381,48 +412,28 @@ func TestExecCommandSequence(t *testing.T) {
 		t.Errorf("ExitCode = %d, want 0", result.ExitCode)
 	}
 
-	// Verify command sequence: send-keys -l, send-keys Enter
+	// Verify command sequence: unset, send-keys -l, send-keys Enter, display-message
 	cmds := mc.getCommands()
-	if len(cmds) < 2 {
-		t.Fatalf("got %d commands, want at least 2: %v", len(cmds), cmds)
+	if len(cmds) < 4 {
+		t.Fatalf("got %d commands, want at least 4: %v", len(cmds), cmds)
 	}
-	if !strings.HasPrefix(cmds[0], "send-keys -l") {
-		t.Errorf("cmd[0] = %q, want send-keys -l prefix", cmds[0])
+	if !strings.Contains(cmds[0], "set-option -pu") || !strings.Contains(cmds[0], "@sshtmux-rv") {
+		t.Errorf("cmd[0] = %q, want set-option -pu @sshtmux-rv", cmds[0])
 	}
-	if !strings.Contains(cmds[0], "echo hello") {
-		t.Errorf("cmd[0] should contain command: %q", cmds[0])
+	if !strings.HasPrefix(cmds[1], "send-keys -l") {
+		t.Errorf("cmd[1] = %q, want send-keys -l prefix", cmds[1])
 	}
-	if !strings.Contains(cmds[0], "__SSHTMUX_DONE_") {
-		t.Errorf("cmd[0] should contain marker: %q", cmds[0])
+	if !strings.Contains(cmds[1], "echo hello") {
+		t.Errorf("cmd[1] should contain command: %q", cmds[1])
 	}
-	if !strings.HasPrefix(cmds[1], "send-keys") || !strings.HasSuffix(cmds[1], "Enter") {
-		t.Errorf("cmd[1] = %q, want send-keys Enter", cmds[1])
+	if !strings.Contains(cmds[1], "@sshtmux-rv") {
+		t.Errorf("cmd[1] should contain @sshtmux-rv: %q", cmds[1])
 	}
-}
-
-func TestExecMarkerSplitAcrossChunks(t *testing.T) {
-	mc := newMockController("%0")
-	exec := NewExecutor(mc)
-
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		mc.outputCh <- `cmd; __e=$?; printf '\n__SSHTMUX_DONE_%d__\n' "$__e"`
-		time.Sleep(10 * time.Millisecond)
-		mc.outputCh <- "output line\n"
-		// Marker arrives split across two chunks
-		mc.outputCh <- "\n__SSHTMUX_"
-		mc.outputCh <- "DONE_0__\n"
-	}()
-
-	result, err := exec.Exec(context.Background(), "cmd", 5*time.Second)
-	if err != nil {
-		t.Fatalf("Exec: %v", err)
+	if !strings.HasPrefix(cmds[2], "send-keys") || !strings.HasSuffix(cmds[2], "Enter") {
+		t.Errorf("cmd[2] = %q, want send-keys Enter", cmds[2])
 	}
-	if result.ExitCode != 0 {
-		t.Errorf("ExitCode = %d, want 0", result.ExitCode)
-	}
-	if !strings.Contains(result.Output, "output line") {
-		t.Errorf("Output = %q, want to contain 'output line'", result.Output)
+	if !strings.Contains(cmds[3], "display-message") || !strings.Contains(cmds[3], "@sshtmux-rv") {
+		t.Errorf("cmd[3] = %q, want display-message poll", cmds[3])
 	}
 }
 
@@ -432,9 +443,9 @@ func TestRunInitStreaming(t *testing.T) {
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		mc.outputCh <- `sudo -i; printf '\n__SSHTMUX_DONE_0__\n'`
+		mc.outputCh <- echoForInit("sudo -i")
 		time.Sleep(10 * time.Millisecond)
-		mc.outputCh <- "\n__SSHTMUX_DONE_0__\n"
+		mc.setRV("0")
 	}()
 
 	if err := exec.RunInit(context.Background(), "sudo -i"); err != nil {
@@ -459,9 +470,9 @@ func TestRunInitStreamingCommandSequence(t *testing.T) {
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		mc.outputCh <- `export FOO=bar; printf '\n__SSHTMUX_DONE_0__\n'`
+		mc.outputCh <- echoForInit("export FOO=bar")
 		time.Sleep(10 * time.Millisecond)
-		mc.outputCh <- "\n__SSHTMUX_DONE_0__\n"
+		mc.setRV("0")
 	}()
 
 	if err := exec.RunInit(context.Background(), "export FOO=bar"); err != nil {
@@ -469,20 +480,24 @@ func TestRunInitStreamingCommandSequence(t *testing.T) {
 	}
 
 	cmds := mc.getCommands()
-	// Should have: send-keys -l, send-keys Enter
-	if len(cmds) < 2 {
-		t.Fatalf("got %d commands, want at least 2: %v", len(cmds), cmds)
+	// Should have: set-option -pu, send-keys -l, send-keys Enter, display-message
+	if len(cmds) < 4 {
+		t.Fatalf("got %d commands, want at least 4: %v", len(cmds), cmds)
 	}
-	// First command is send-keys -l (literal, no Enter)
-	if !strings.HasPrefix(cmds[0], "send-keys -l") {
-		t.Errorf("cmd[0] = %q, want send-keys -l prefix", cmds[0])
+	if !strings.Contains(cmds[0], "set-option -pu") || !strings.Contains(cmds[0], "@sshtmux-rv") {
+		t.Errorf("cmd[0] = %q, want set-option -pu @sshtmux-rv", cmds[0])
 	}
-	if !strings.Contains(cmds[0], "export FOO=bar") {
-		t.Errorf("cmd[0] should contain command: %q", cmds[0])
+	if !strings.HasPrefix(cmds[1], "send-keys -l") {
+		t.Errorf("cmd[1] = %q, want send-keys -l prefix", cmds[1])
 	}
-	// Second command is send-keys Enter
-	if !strings.HasPrefix(cmds[1], "send-keys") || !strings.HasSuffix(cmds[1], "Enter") {
-		t.Errorf("cmd[1] = %q, want send-keys Enter", cmds[1])
+	if !strings.Contains(cmds[1], "export FOO=bar") {
+		t.Errorf("cmd[1] should contain command: %q", cmds[1])
+	}
+	if !strings.HasPrefix(cmds[2], "send-keys") || !strings.HasSuffix(cmds[2], "Enter") {
+		t.Errorf("cmd[2] = %q, want send-keys Enter", cmds[2])
+	}
+	if !strings.Contains(cmds[3], "display-message") || !strings.Contains(cmds[3], "@sshtmux-rv") {
+		t.Errorf("cmd[3] = %q, want display-message poll", cmds[3])
 	}
 }
 
