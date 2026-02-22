@@ -129,22 +129,6 @@ func (m *mockController) setResponse(prefix, data string) {
 	m.responses[prefix] = data
 }
 
-// setupExecMock configures the mock for the streaming exec flow.
-// Retained for compatibility with session_test.go until Task 6 updates those tests.
-// The captureData parameter is ignored in the streaming flow; exitCode configures
-// the display-message response for @sshtmux-rv.
-func setupExecMock(mc *mockController, captureData string, exitCode int) {
-	mc.responseFunc["display-message"] = func(cmd string) string {
-		if strings.Contains(cmd, "@sshtmux-done") {
-			return "1"
-		}
-		if strings.Contains(cmd, "@sshtmux-rv") {
-			return fmt.Sprintf("%d", exitCode)
-		}
-		return ""
-	}
-}
-
 func TestExecStreaming(t *testing.T) {
 	mc := newMockController("%0")
 	var rvReady atomic.Bool

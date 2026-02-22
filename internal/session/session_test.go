@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,10 +27,23 @@ func TestNewFromController(t *testing.T) {
 
 func TestSessionExec(t *testing.T) {
 	mc := newMockController("%0")
-	mc.responses["capture-pane"] = "echo hello; __rv=$?; tmux set-option -p @sshtmux-rv \"$__rv\"; tmux wait-for -S __sshtmux_wf_1\nhello"
-	mc.responses["display-message"] = "0"
+	var rvReady atomic.Bool
+	mc.responseFunc["display-message"] = func(cmd string) string {
+		if strings.Contains(cmd, "@sshtmux-rv") && rvReady.Load() {
+			return "0"
+		}
+		return ""
+	}
 
 	sess := NewFromController(mc, "testhost", "testuser")
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		mc.outputCh <- "echo hello; tmux set-option -p @sshtmux-rv $?"
+		time.Sleep(10 * time.Millisecond)
+		mc.outputCh <- "hello\n"
+		rvReady.Store(true)
+	}()
 
 	ctx := context.Background()
 	result, err := sess.Exec(ctx, "echo hello", 5*time.Second)
@@ -106,12 +120,21 @@ func TestNewFromControllerSetsExecutor(t *testing.T) {
 
 func TestSessionExecTimeout(t *testing.T) {
 	mc := newMockController("%0")
-	mc.blockPrefixes = []string{"wait-for"} // blocks wait-for
+	// rv never returns a value
+	mc.responseFunc["display-message"] = func(cmd string) string {
+		return ""
+	}
 
 	sess := NewFromController(mc, "testhost", "testuser")
 
+	// Send echo so we get past echo phase, but rv never set
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		mc.outputCh <- "sleep 100; tmux set-option -p @sshtmux-rv $?"
+	}()
+
 	ctx := context.Background()
-	_, err := sess.Exec(ctx, "sleep 100", 50*time.Millisecond)
+	_, err := sess.Exec(ctx, "sleep 100", 500*time.Millisecond)
 	if err == nil {
 		t.Error("expected timeout error")
 	}
