@@ -139,22 +139,7 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 	}
 	vlog.Logf(ctx, "session: tmux handshake complete")
 
-	// Discover the actual socket path so shell-embedded tmux commands can
-	// use -S to reach the correct server. Critical when pre_command spawns
-	// a login shell that clears TMUX env var.
-	if tmuxSocketPath == "" {
-		result, err := ctrl.SendCommand(ctx, "display-message -p '#{socket_path}'")
-		if err == nil {
-			discovered := strings.TrimSpace(result.Data)
-			// Older tmux returns the literal format string if unsupported
-			if discovered != "" && !strings.Contains(discovered, "#{") {
-				tmuxSocketPath = discovered
-				vlog.Logf(ctx, "session: discovered socket path: %s", tmuxSocketPath)
-			}
-		}
-	}
-
-	s.executor = NewExecutor(ctrl, tmuxSocketPath)
+	s.executor = NewExecutor(ctrl)
 
 	// Discover pane ID from initial output
 	if err := s.discoverPane(ctx); err != nil {
@@ -249,6 +234,6 @@ func NewFromController(ctrl tmux.Controller, host, user string) *Session {
 		Host:     host,
 		User:     user,
 		ctrl:     ctrl,
-		executor: NewExecutor(ctrl, ""),
+		executor: NewExecutor(ctrl),
 	}
 }

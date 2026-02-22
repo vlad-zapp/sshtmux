@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,8 +13,6 @@ import (
 
 func TestNewFromController(t *testing.T) {
 	mc := newMockController("%0")
-	mc.responses["display-message"] = "0"
-
 	sess := NewFromController(mc, "testhost", "testuser")
 	if sess.Host != "testhost" {
 		t.Errorf("Host = %q, want %q", sess.Host, "testhost")
@@ -27,22 +24,14 @@ func TestNewFromController(t *testing.T) {
 
 func TestSessionExec(t *testing.T) {
 	mc := newMockController("%0")
-	var rvReady atomic.Bool
-	mc.responseFunc["display-message"] = func(cmd string) string {
-		if strings.Contains(cmd, "@sshtmux-rv") && rvReady.Load() {
-			return "0"
-		}
-		return ""
-	}
-
 	sess := NewFromController(mc, "testhost", "testuser")
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		mc.outputCh <- "echo hello; tmux set-option -p @sshtmux-rv $?"
+		mc.outputCh <- `echo hello; __e=$?; printf '\n__SSHTMUX_DONE_%d__\n' "$__e"`
 		time.Sleep(10 * time.Millisecond)
 		mc.outputCh <- "hello\n"
-		rvReady.Store(true)
+		mc.outputCh <- "\n__SSHTMUX_DONE_0__\n"
 	}()
 
 	ctx := context.Background()
@@ -120,17 +109,12 @@ func TestNewFromControllerSetsExecutor(t *testing.T) {
 
 func TestSessionExecTimeout(t *testing.T) {
 	mc := newMockController("%0")
-	// rv never returns a value
-	mc.responseFunc["display-message"] = func(cmd string) string {
-		return ""
-	}
-
 	sess := NewFromController(mc, "testhost", "testuser")
 
-	// Send echo so we get past echo phase, but rv never set
+	// Send echo so we get past echo phase, but marker never arrives
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		mc.outputCh <- "sleep 100; tmux set-option -p @sshtmux-rv $?"
+		mc.outputCh <- `sleep 100; __e=$?; printf '\n__SSHTMUX_DONE_%d__\n' "$__e"`
 	}()
 
 	ctx := context.Background()

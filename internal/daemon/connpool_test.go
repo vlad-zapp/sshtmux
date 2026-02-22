@@ -26,10 +26,9 @@ func (c *noopController) SendCommand(ctx context.Context, cmd string) (*tmux.Com
 		if text != "" {
 			go func() { c.outputCh <- text }()
 		}
-	}
-	// Return "0" for @sshtmux-rv queries (command succeeded).
-	if strings.Contains(cmd, "@sshtmux-rv") && strings.HasPrefix(cmd, "display-message") {
-		return &tmux.CommandResult{Data: "0"}, nil
+	} else if strings.HasPrefix(cmd, "send-keys") && strings.HasSuffix(cmd, "Enter") {
+		// Simulate command completion by sending done marker.
+		go func() { c.outputCh <- "\n__SSHTMUX_DONE_0__\n" }()
 	}
 	return &tmux.CommandResult{}, nil
 }
