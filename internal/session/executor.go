@@ -34,11 +34,20 @@ type Executor struct {
 	counter      atomic.Int64
 	sem          chan struct{}    // size 1, serializes Exec/RunInit on this session
 	PollInterval time.Duration   // how often to check @sshtmux-rv; 0 = default (200ms)
+	SocketPath   string          // tmux socket path for pane-embedded commands; empty = omit -S
 }
 
 // NewExecutor creates a new executor using the given tmux controller.
 func NewExecutor(ctrl tmux.Controller) *Executor {
 	return &Executor{ctrl: ctrl, sem: make(chan struct{}, 1)}
+}
+
+// tmuxCmd returns the tmux command prefix for use inside the pane shell.
+func (e *Executor) tmuxCmd() string {
+	if e.SocketPath != "" {
+		return "tmux -S " + e.SocketPath
+	}
+	return "tmux"
 }
 
 func (e *Executor) pollInterval() time.Duration {
@@ -86,8 +95,7 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 
 	// Type command with completion signal (no Enter).
 	// After the command runs, tmux set-option sets @sshtmux-rv to the exit code.
-	// Uses ${TMUX%%,*} to extract the socket path from the $TMUX env var.
-	shellLine := command + `; tmux -S "${TMUX%%,*}" set-option -p -t ` + paneID + ` @sshtmux-rv $?`
+	shellLine := command + "; " + e.tmuxCmd() + " set-option -p -t " + paneID + " @sshtmux-rv $?"
 	sendLiteral := tmux.FormatSendKeysLiteral(paneID, shellLine)
 	if _, err := e.ctrl.SendCommand(ctx, sendLiteral); err != nil {
 		return nil, fmt.Errorf("send-keys literal: %w", err)
@@ -172,7 +180,7 @@ func (e *Executor) RunInit(ctx context.Context, command string) error {
 	}
 
 	// Type command with completion signal (no Enter).
-	shellLine := command + `; tmux -S "${TMUX%%,*}" set-option -p -t ` + paneID + ` @sshtmux-rv 0`
+	shellLine := command + "; " + e.tmuxCmd() + " set-option -p -t " + paneID + " @sshtmux-rv 0"
 	sendLiteral := tmux.FormatSendKeysLiteral(paneID, shellLine)
 	if _, err := e.ctrl.SendCommand(initCtx, sendLiteral); err != nil {
 		return fmt.Errorf("send-keys literal: %w", err)

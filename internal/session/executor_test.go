@@ -154,12 +154,12 @@ func (m *mockController) setRV(val string) {
 
 // echoForExec returns the expected echo text for a command in Exec.
 func echoForExec(cmd string) string {
-	return cmd + `; tmux -S "${TMUX%%,*}" set-option -p -t %0 @sshtmux-rv $?`
+	return cmd + "; tmux set-option -p -t %0 @sshtmux-rv $?"
 }
 
 // echoForInit returns the expected echo text for a command in RunInit.
 func echoForInit(cmd string) string {
-	return cmd + `; tmux -S "${TMUX%%,*}" set-option -p -t %0 @sshtmux-rv 0`
+	return cmd + "; tmux set-option -p -t %0 @sshtmux-rv 0"
 }
 
 func TestExecStreaming(t *testing.T) {
@@ -217,9 +217,9 @@ func TestExecStreamingEchoInChunks(t *testing.T) {
 	go func() {
 		time.Sleep(10 * time.Millisecond)
 		// Echo arrives in chunks, last chunk contains @sshtmux-rv
-		mc.outputCh <- "echo hello; tmux"
-		mc.outputCh <- ` -S "${TMUX%%,*}" set-option -p -t %0 `
-		mc.outputCh <- `@sshtmux-rv $?`
+		mc.outputCh <- "echo hello; tmux set-opt"
+		mc.outputCh <- "ion -p -t %0 "
+		mc.outputCh <- "@sshtmux-rv $?"
 		time.Sleep(10 * time.Millisecond)
 		mc.outputCh <- "hello\n"
 		mc.setRV("0")

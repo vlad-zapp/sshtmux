@@ -146,6 +146,20 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 		return fmt.Errorf("discover pane: %w", err)
 	}
 
+	// Discover tmux socket path so pane-embedded commands use an explicit -S flag
+	// instead of relying on $TMUX (which may be absent after sudo/toor).
+	if sp, err := ctrl.SendCommand(ctx, "display-message -p '#{socket_path}'"); err == nil {
+		val := strings.TrimSpace(sp.Data)
+		if val != "" && val[0] == '/' {
+			s.executor.SocketPath = val
+			vlog.Logf(ctx, "session: discovered socket path %s", val)
+		}
+	}
+	if s.executor.SocketPath == "" && tmuxSocketPath != "" {
+		s.executor.SocketPath = tmuxSocketPath
+		vlog.Logf(ctx, "session: using configured socket path %s", tmuxSocketPath)
+	}
+
 	// Disable mouse mode — it generates escape sequences that interfere
 	// with output parsing in control mode.
 	if _, err := ctrl.SendCommand(ctx, "set-option -p mouse off"); err != nil {
