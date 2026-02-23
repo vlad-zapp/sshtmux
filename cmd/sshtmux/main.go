@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/vlad-zapp/sshtmux/internal/client"
 	"github.com/vlad-zapp/sshtmux/internal/config"
@@ -55,7 +56,7 @@ func main() {
 
 func printUsage() {
 	fmt.Fprintf(os.Stderr, `Usage:
-  sshtmux [-v] [user@]host command   Execute command on remote host
+  sshtmux [-v] [--timeout duration] [user@]host command   Execute command on remote host
   sshtmux status                     Show cached connections
   sshtmux disconnect [host]          Close cached connection
   sshtmux shutdown                   Stop the daemon
@@ -63,7 +64,8 @@ func printUsage() {
   sshtmux mcp                        Run MCP server (stdio)
 
 Options:
-  -v    Verbose output (must be first argument)
+  -v              Verbose output (must be first argument)
+  --timeout       Command timeout (e.g. 30s, 1m, 5m). Default: 30s
 `)
 }
 
@@ -77,15 +79,37 @@ func loadConfig() config.Config {
 }
 
 func runExec(args []string) {
-	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: sshtmux [-v] [user@]host command [args...]\n")
+	fs := flag.NewFlagSet("exec", flag.ExitOnError)
+	timeoutFlag := fs.String("timeout", "", "Command timeout (e.g. 30s, 1m, 5m). Default: 30s")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: sshtmux [-v] [--timeout duration] [user@]host command [args...]\n")
+	}
+	fs.Parse(args)
+
+	remaining := fs.Args()
+	if len(remaining) < 2 {
+		fs.Usage()
 		os.Exit(1)
 	}
 
-	host, user := parseHostUser(args[0])
-	command := strings.Join(args[1:], " ")
+	host, user := parseHostUser(remaining[0])
+	command := strings.Join(remaining[1:], " ")
 
-	vlog.Printf("cli: exec host=%q user=%q command=%q", host, user, command)
+	var timeoutSecs int
+	if *timeoutFlag != "" {
+		d, err := time.ParseDuration(*timeoutFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: invalid timeout %q: %v\n", *timeoutFlag, err)
+			os.Exit(1)
+		}
+		timeoutSecs = int(d.Seconds())
+		if timeoutSecs <= 0 {
+			fmt.Fprintf(os.Stderr, "Error: timeout must be positive\n")
+			os.Exit(1)
+		}
+	}
+
+	vlog.Printf("cli: exec host=%q user=%q command=%q timeout=%d", host, user, command, timeoutSecs)
 
 	cfg := loadConfig()
 	c := client.NewClient(cfg.SocketPath)
@@ -97,7 +121,7 @@ func runExec(args []string) {
 	}
 
 	vlog.Printf("cli: sending exec request to daemon")
-	resp, err := c.Exec(host, user, command)
+	resp, err := c.Exec(host, user, command, timeoutSecs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

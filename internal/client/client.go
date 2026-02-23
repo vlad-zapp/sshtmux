@@ -39,7 +39,14 @@ func (c *Client) Send(req daemon.Request) (*daemon.Response, error) {
 	}
 	defer conn.Close()
 
-	conn.SetDeadline(time.Now().Add(operationDeadline))
+	deadline := operationDeadline
+	if req.TimeoutSecs > 0 {
+		reqTimeout := time.Duration(req.TimeoutSecs)*time.Second + 10*time.Second
+		if reqTimeout > deadline {
+			deadline = reqTimeout
+		}
+	}
+	conn.SetDeadline(time.Now().Add(deadline))
 
 	if err := daemon.WriteMessage(conn, &req); err != nil {
 		return nil, fmt.Errorf("send request: %w", err)
@@ -67,12 +74,14 @@ func (c *Client) Send(req daemon.Request) (*daemon.Response, error) {
 }
 
 // Exec is a convenience method for executing a command.
-func (c *Client) Exec(host, user, command string) (*daemon.Response, error) {
+// timeoutSecs overrides the default command timeout; 0 means use the daemon default.
+func (c *Client) Exec(host, user, command string, timeoutSecs int) (*daemon.Response, error) {
 	return c.Send(daemon.Request{
-		Type:    "exec",
-		Host:    host,
-		User:    user,
-		Command: command,
+		Type:        "exec",
+		Host:        host,
+		User:        user,
+		Command:     command,
+		TimeoutSecs: timeoutSecs,
 	})
 }
 

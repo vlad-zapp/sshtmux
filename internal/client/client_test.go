@@ -101,7 +101,7 @@ func TestClientExec(t *testing.T) {
 	defer cleanup()
 
 	c := NewClient(sockPath)
-	resp, err := c.Exec("host1", "user1", "echo hello")
+	resp, err := c.Exec("host1", "user1", "echo hello", 0)
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestClientStatus(t *testing.T) {
 	c := NewClient(sockPath)
 
 	// Create a session
-	c.Exec("host1", "user1", "ls")
+	c.Exec("host1", "user1", "ls", 0)
 
 	resp, err := c.Status()
 	if err != nil {
@@ -133,7 +133,7 @@ func TestClientDisconnect(t *testing.T) {
 	defer cleanup()
 
 	c := NewClient(sockPath)
-	c.Exec("host1", "user1", "ls")
+	c.Exec("host1", "user1", "ls", 0)
 
 	resp, err := c.Disconnect("host1", "user1")
 	if err != nil {
@@ -168,7 +168,7 @@ func TestClientShutdown(t *testing.T) {
 
 func TestClientConnectionRefused(t *testing.T) {
 	c := NewClient("/nonexistent/sock")
-	_, err := c.Exec("host1", "user1", "ls")
+	_, err := c.Exec("host1", "user1", "ls", 0)
 	if err == nil {
 		t.Error("expected error when daemon not running")
 	}

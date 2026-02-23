@@ -370,6 +370,85 @@ func TestDaemonExecTimeoutEvictsSession(t *testing.T) {
 	}
 }
 
+func TestDaemonExecPerRequestTimeout(t *testing.T) {
+	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
+		ctrl := &hangingController{
+			noopController: noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)},
+		}
+		return session.NewFromController(ctrl, host, user), nil
+	}
+
+	pool := NewConnPool(factory, 5*time.Minute)
+	sockPath := filepath.Join(t.TempDir(), "test.sock")
+	// Default timeout is long (30s), but per-request timeout is short
+	d, err := NewDaemon(pool, sockPath, 30*time.Second)
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	defer d.Stop()
+	go d.Serve()
+	time.Sleep(10 * time.Millisecond)
+
+	start := time.Now()
+	resp := sendRequest(t, sockPath, Request{
+		Type:        "exec",
+		Host:        "host1",
+		User:        "user1",
+		Command:     "sleep 100",
+		TimeoutSecs: 1, // 1 second per-request override
+	})
+	elapsed := time.Since(start)
+
+	if resp.Error == "" {
+		t.Fatal("expected timeout error")
+	}
+	if !strings.Contains(resp.Error, "deadline exceeded") {
+		t.Errorf("expected deadline exceeded error, got %q", resp.Error)
+	}
+	// Should have timed out in ~1s, not 30s
+	if elapsed > 5*time.Second {
+		t.Errorf("per-request timeout not respected: took %v (expected ~1s)", elapsed)
+	}
+}
+
+func TestDaemonExecPerRequestTimeoutZeroUsesDefault(t *testing.T) {
+	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
+		ctrl := &hangingController{
+			noopController: noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)},
+		}
+		return session.NewFromController(ctrl, host, user), nil
+	}
+
+	pool := NewConnPool(factory, 5*time.Minute)
+	sockPath := filepath.Join(t.TempDir(), "test.sock")
+	// Default timeout is very short
+	d, err := NewDaemon(pool, sockPath, 500*time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	defer d.Stop()
+	go d.Serve()
+	time.Sleep(10 * time.Millisecond)
+
+	start := time.Now()
+	resp := sendRequest(t, sockPath, Request{
+		Type:        "exec",
+		Host:        "host1",
+		User:        "user1",
+		Command:     "sleep 100",
+		TimeoutSecs: 0, // zero means use default
+	})
+	elapsed := time.Since(start)
+
+	if resp.Error == "" {
+		t.Fatal("expected timeout error")
+	}
+	// Should have timed out in ~500ms (daemon default), not longer
+	if elapsed > 3*time.Second {
+		t.Errorf("zero timeout should use daemon default: took %v (expected ~500ms)", elapsed)
+	}
+}
+
 func TestDaemonExecTimeoutCreatesNewSessionOnRetry(t *testing.T) {
 	var createCount atomic.Int32
 	factory := func(ctx context.Context, host, user string) (*session.Session, error) {

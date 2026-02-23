@@ -152,7 +152,11 @@ func (d *Daemon) dispatch(conn net.Conn, req Request) Response {
 }
 
 func (d *Daemon) handleExec(ctx context.Context, req Request) Response {
-	ctx, cancel := context.WithTimeout(ctx, d.commandTimeout)
+	timeout := d.commandTimeout
+	if req.TimeoutSecs > 0 {
+		timeout = time.Duration(req.TimeoutSecs) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	vlog.Logf(ctx, "daemon: getting session for %s@%s", req.User, req.Host)

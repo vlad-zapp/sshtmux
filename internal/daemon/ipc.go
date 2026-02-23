@@ -9,11 +9,12 @@ import (
 
 // Request represents a CLI-to-daemon request.
 type Request struct {
-	Type    string `json:"type"`    // "exec", "disconnect", "status", "shutdown"
-	Host    string `json:"host"`
-	User    string `json:"user"`
-	Command string `json:"command"`
-	Verbose bool   `json:"verbose,omitempty"`
+	Type        string `json:"type"`    // "exec", "disconnect", "status", "shutdown"
+	Host        string `json:"host"`
+	User        string `json:"user"`
+	Command     string `json:"command"`
+	Verbose     bool   `json:"verbose,omitempty"`
+	TimeoutSecs int    `json:"timeout_secs,omitempty"`
 }
 
 // Response represents a daemon-to-CLI response.

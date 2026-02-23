@@ -280,6 +280,101 @@ func TestHandleExecStripsANSIWithExitCode(t *testing.T) {
 	}
 }
 
+func TestHandleExecTimeoutPassedToDaemon(t *testing.T) {
+	ms := &mockSender{
+		response: &daemon.Response{
+			Success:  true,
+			Output:   "ok",
+			ExitCode: 0,
+		},
+	}
+	srv := New(ms)
+
+	_, _, err := srv.handleExec(context.Background(), &mcp.CallToolRequest{}, ExecInput{
+		Host:    "myhost",
+		Command: "slow-command",
+		Timeout: 120,
+	})
+	if err != nil {
+		t.Fatalf("handleExec: %v", err)
+	}
+	if ms.lastRequest.TimeoutSecs != 120 {
+		t.Errorf("TimeoutSecs = %d, want 120", ms.lastRequest.TimeoutSecs)
+	}
+}
+
+func TestHandleExecTimeoutZeroUsesDefault(t *testing.T) {
+	ms := &mockSender{
+		response: &daemon.Response{
+			Success:  true,
+			Output:   "ok",
+			ExitCode: 0,
+		},
+	}
+	srv := New(ms)
+
+	_, _, err := srv.handleExec(context.Background(), &mcp.CallToolRequest{}, ExecInput{
+		Host:    "myhost",
+		Command: "ls",
+		Timeout: 0,
+	})
+	if err != nil {
+		t.Fatalf("handleExec: %v", err)
+	}
+	if ms.lastRequest.TimeoutSecs != 0 {
+		t.Errorf("TimeoutSecs = %d, want 0 (daemon default)", ms.lastRequest.TimeoutSecs)
+	}
+}
+
+func TestHandleExecTimeoutExceedsMax(t *testing.T) {
+	ms := &mockSender{
+		response: &daemon.Response{Success: true},
+	}
+	srv := New(ms)
+
+	result, _, err := srv.handleExec(context.Background(), &mcp.CallToolRequest{}, ExecInput{
+		Host:    "myhost",
+		Command: "very-slow-command",
+		Timeout: 601, // exceeds 600s max
+	})
+	if err != nil {
+		t.Fatalf("handleExec: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected IsError=true for timeout exceeding max")
+	}
+	tc := result.Content[0].(*mcp.TextContent)
+	if !strings.Contains(tc.Text, "exceeds maximum") {
+		t.Errorf("error should mention exceeds maximum, got %q", tc.Text)
+	}
+}
+
+func TestHandleExecTimeoutExactlyMax(t *testing.T) {
+	ms := &mockSender{
+		response: &daemon.Response{
+			Success:  true,
+			Output:   "ok",
+			ExitCode: 0,
+		},
+	}
+	srv := New(ms)
+
+	result, _, err := srv.handleExec(context.Background(), &mcp.CallToolRequest{}, ExecInput{
+		Host:    "myhost",
+		Command: "long-command",
+		Timeout: 600, // exactly max, should be allowed
+	})
+	if err != nil {
+		t.Fatalf("handleExec: %v", err)
+	}
+	if result.IsError {
+		t.Error("expected no error for timeout exactly at max")
+	}
+	if ms.lastRequest.TimeoutSecs != 600 {
+		t.Errorf("TimeoutSecs = %d, want 600", ms.lastRequest.TimeoutSecs)
+	}
+}
+
 func TestErrorResult(t *testing.T) {
 	result := errorResult("something broke")
 	if !result.IsError {
