@@ -174,7 +174,33 @@ func TestFormatSendKeysWithSingleQuotes(t *testing.T) {
 
 func TestFormatSendKeysLiteral(t *testing.T) {
 	got := FormatSendKeysLiteral("%0", "echo hello")
-	want := "send-keys -l -t %0 'echo hello'"
+	want := "send-keys -H -t %0 65 63 68 6f 20 68 65 6c 6c 6f"
+	if got != want {
+		t.Errorf("FormatSendKeysLiteral = %q, want %q", got, want)
+	}
+}
+
+func TestFormatSendKeysLiteralNewline(t *testing.T) {
+	got := FormatSendKeysLiteral("%0", "a\nb")
+	// \n encoded as Ctrl+V (16) + newline (0a)
+	want := "send-keys -H -t %0 61 16 0a 62"
+	if got != want {
+		t.Errorf("FormatSendKeysLiteral = %q, want %q", got, want)
+	}
+}
+
+func TestFormatSendKeysLiteralSingleQuotes(t *testing.T) {
+	got := FormatSendKeysLiteral("%0", "echo 'hi'")
+	// Single quotes (27) need no special handling in hex mode
+	want := "send-keys -H -t %0 65 63 68 6f 20 27 68 69 27"
+	if got != want {
+		t.Errorf("FormatSendKeysLiteral = %q, want %q", got, want)
+	}
+}
+
+func TestFormatSendKeysLiteralEmpty(t *testing.T) {
+	got := FormatSendKeysLiteral("%0", "")
+	want := "send-keys -H -t %0"
 	if got != want {
 		t.Errorf("FormatSendKeysLiteral = %q, want %q", got, want)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -32,10 +33,10 @@ func (c *noopController) SendCommand(ctx context.Context, cmd string) (*tmux.Com
 	if strings.Contains(cmd, "display-message") && strings.Contains(cmd, "@sshtmux-rv") {
 		return &tmux.CommandResult{Data: c.rvValue}, nil
 	}
-	// When receiving send-keys -l, simulate terminal echo by
-	// extracting the text and sending it to outputCh.
-	if strings.HasPrefix(cmd, "send-keys -l") {
-		text := extractSendKeysLiteralText(cmd)
+	// When receiving send-keys -H, simulate terminal echo by
+	// decoding the hex bytes and sending them to outputCh.
+	if strings.HasPrefix(cmd, "send-keys -H") {
+		text := decodeHexSendKeys(cmd)
 		if text != "" {
 			go func() { c.outputCh <- text }()
 		}
@@ -63,19 +64,27 @@ func (c *noopController) Alive() bool              { return true }
 func (c *noopController) Detach() error            { return nil }
 func (c *noopController) Close() error             { return nil }
 
-// extractSendKeysLiteralText extracts the quoted text from a send-keys -l command.
-// Input format: "send-keys -l -t %0 'some text here'"
-func extractSendKeysLiteralText(cmd string) string {
-	idx := strings.IndexByte(cmd, '\'')
-	if idx < 0 {
+// decodeHexSendKeys decodes a send-keys -H command back to text.
+// Input format: "send-keys -H -t %0 65 63 68 6f ..."
+// Ctrl+V bytes (0x16) are stripped as they are quoted-insert prefixes.
+func decodeHexSendKeys(cmd string) string {
+	parts := strings.SplitN(cmd, " ", 5) // send-keys -H -t %<id> <hex...>
+	if len(parts) < 5 {
 		return ""
 	}
-	rest := cmd[idx+1:]
-	end := strings.LastIndexByte(rest, '\'')
-	if end < 0 {
-		return rest
+	tokens := strings.Fields(parts[4])
+	var b strings.Builder
+	for _, tok := range tokens {
+		val, err := strconv.ParseUint(tok, 16, 8)
+		if err != nil {
+			continue
+		}
+		if val == 0x16 {
+			continue
+		}
+		b.WriteByte(byte(val))
 	}
-	return rest[:end]
+	return b.String()
 }
 
 func testFactory(ctx context.Context, host, user string) (*session.Session, error) {

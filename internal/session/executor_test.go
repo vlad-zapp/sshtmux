@@ -412,7 +412,7 @@ func TestExecCommandSequence(t *testing.T) {
 		t.Errorf("ExitCode = %d, want 0", result.ExitCode)
 	}
 
-	// Verify command sequence: unset, send-keys -l, send-keys Enter, display-message
+	// Verify command sequence: unset, send-keys -H, send-keys Enter, display-message
 	cmds := mc.getCommands()
 	if len(cmds) < 4 {
 		t.Fatalf("got %d commands, want at least 4: %v", len(cmds), cmds)
@@ -420,20 +420,59 @@ func TestExecCommandSequence(t *testing.T) {
 	if !strings.Contains(cmds[0], "set-option -pu") || !strings.Contains(cmds[0], "@sshtmux-rv") {
 		t.Errorf("cmd[0] = %q, want set-option -pu @sshtmux-rv", cmds[0])
 	}
-	if !strings.HasPrefix(cmds[1], "send-keys -l") {
-		t.Errorf("cmd[1] = %q, want send-keys -l prefix", cmds[1])
-	}
-	if !strings.Contains(cmds[1], "echo hello") {
-		t.Errorf("cmd[1] should contain command: %q", cmds[1])
-	}
-	if !strings.Contains(cmds[1], "@sshtmux-rv") {
-		t.Errorf("cmd[1] should contain @sshtmux-rv: %q", cmds[1])
+	if !strings.HasPrefix(cmds[1], "send-keys -H") {
+		t.Errorf("cmd[1] = %q, want send-keys -H prefix", cmds[1])
 	}
 	if !strings.HasPrefix(cmds[2], "send-keys") || !strings.HasSuffix(cmds[2], "Enter") {
 		t.Errorf("cmd[2] = %q, want send-keys Enter", cmds[2])
 	}
 	if !strings.Contains(cmds[3], "display-message") || !strings.Contains(cmds[3], "@sshtmux-rv") {
 		t.Errorf("cmd[3] = %q, want display-message poll", cmds[3])
+	}
+}
+
+func TestExecMultilineCommand(t *testing.T) {
+	mc := newMockController("%0")
+	exec := NewExecutor(mc)
+
+	multilineCmd := "set -euo pipefail\necho hello"
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		mc.outputCh <- echoForExec(multilineCmd)
+		time.Sleep(10 * time.Millisecond)
+		mc.outputCh <- "hello\n"
+		mc.setRV("0")
+	}()
+
+	result, err := exec.Exec(context.Background(), multilineCmd, 5*time.Second)
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0", result.ExitCode)
+	}
+
+	cmds := mc.getCommands()
+	if len(cmds) < 2 {
+		t.Fatalf("got %d commands, want at least 2: %v", len(cmds), cmds)
+	}
+	// send-keys must use -H hex mode
+	if !strings.HasPrefix(cmds[1], "send-keys -H") {
+		t.Errorf("cmd[1] = %q, want send-keys -H prefix", cmds[1])
+	}
+	// Newlines must be encoded as Ctrl+V (16) + newline (0a), not bare 0a
+	if !strings.Contains(cmds[1], " 16 0a ") {
+		t.Errorf("cmd[1] = %q, want Ctrl+V newline (16 0a) for embedded newline", cmds[1])
+	}
+	// Must NOT contain bare 0a without preceding 16 (which would execute prematurely)
+	// The hex string should only have 0a immediately after 16
+	hexPart := cmds[1][len("send-keys -H -t %0"):]
+	hexTokens := strings.Fields(hexPart)
+	for i, tok := range hexTokens {
+		if tok == "0a" && (i == 0 || hexTokens[i-1] != "16") {
+			t.Errorf("cmd[1] contains bare 0a at position %d without preceding 16: %q", i, cmds[1])
+		}
 	}
 }
 
@@ -480,18 +519,15 @@ func TestRunInitStreamingCommandSequence(t *testing.T) {
 	}
 
 	cmds := mc.getCommands()
-	// Should have: set-option -pu, send-keys -l, send-keys Enter, display-message
+	// Should have: set-option -pu, send-keys -H, send-keys Enter, display-message
 	if len(cmds) < 4 {
 		t.Fatalf("got %d commands, want at least 4: %v", len(cmds), cmds)
 	}
 	if !strings.Contains(cmds[0], "set-option -pu") || !strings.Contains(cmds[0], "@sshtmux-rv") {
 		t.Errorf("cmd[0] = %q, want set-option -pu @sshtmux-rv", cmds[0])
 	}
-	if !strings.HasPrefix(cmds[1], "send-keys -l") {
-		t.Errorf("cmd[1] = %q, want send-keys -l prefix", cmds[1])
-	}
-	if !strings.Contains(cmds[1], "export FOO=bar") {
-		t.Errorf("cmd[1] should contain command: %q", cmds[1])
+	if !strings.HasPrefix(cmds[1], "send-keys -H") {
+		t.Errorf("cmd[1] = %q, want send-keys -H prefix", cmds[1])
 	}
 	if !strings.HasPrefix(cmds[2], "send-keys") || !strings.HasSuffix(cmds[2], "Enter") {
 		t.Errorf("cmd[2] = %q, want send-keys Enter", cmds[2])

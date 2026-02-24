@@ -125,9 +125,21 @@ func FormatSendKeys(target, text string) string {
 	return fmt.Sprintf("send-keys -t %s %s Enter", target, ShellQuote(text))
 }
 
-// FormatSendKeysLiteral formats a send-keys command with -l (literal, no Enter).
+// FormatSendKeysLiteral formats a send-keys command with -H (hex mode, no Enter).
+// Newline bytes are sent as Ctrl+V (0x16) + newline (0x0a) to insert them
+// literally into the line editor without triggering execution.
 func FormatSendKeysLiteral(target, text string) string {
-	return fmt.Sprintf("send-keys -l -t %s %s", target, ShellQuote(text))
+	var b strings.Builder
+	b.WriteString("send-keys -H -t ")
+	b.WriteString(target)
+	for i := 0; i < len(text); i++ {
+		if text[i] == '\n' {
+			b.WriteString(" 16 0a")
+		} else {
+			fmt.Fprintf(&b, " %02x", text[i])
+		}
+	}
+	return b.String()
 }
 
 // FormatSendKeysEnter formats a send-keys command that presses Enter.
