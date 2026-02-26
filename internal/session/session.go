@@ -32,12 +32,13 @@ type Options struct {
 	TmuxSocketPath string
 	Term           string
 	HistoryLimit   int
+	StartupTimeout time.Duration // 0 means use defaultStartupTimeout
 }
 
-// startupTimeout bounds the entire tmux startup sequence (handshake, pane
-// discovery, init commands) to prevent indefinite hangs when SSH connections
-// die silently (e.g. through proxies).
-const startupTimeout = 30 * time.Second
+// defaultStartupTimeout bounds the entire tmux startup sequence (handshake,
+// pane discovery, init commands) to prevent indefinite hangs when SSH
+// connections die silently (e.g. through proxies).
+const defaultStartupTimeout = 60 * time.Second
 
 // New creates a new session: SSH connect → tmux -C → init commands.
 func New(ctx context.Context, dialer sshclient.Dialer, host, user string, opts Options) (*Session, error) {
@@ -98,7 +99,11 @@ func (s *Session) cleanupSSH() {
 // server), the caller should reconnect and retry with killExisting=false.
 func (s *Session) startTmux(ctx context.Context, opts Options, killExisting bool) error {
 	// Apply a startup-specific timeout to prevent indefinite hangs.
-	startCtx, startCancel := context.WithTimeout(ctx, startupTimeout)
+	timeout := opts.StartupTimeout
+	if timeout <= 0 {
+		timeout = defaultStartupTimeout
+	}
+	startCtx, startCancel := context.WithTimeout(ctx, timeout)
 	defer startCancel()
 
 	preCommand := opts.PreCommand

@@ -177,6 +177,7 @@ func runDaemon(args []string) {
 			TmuxSocketPath: cfg.TmuxSocketPath,
 			Term:           hs.Term,
 			HistoryLimit:   hs.HistoryLimit,
+			StartupTimeout: hs.StartupTimeout.Duration,
 		})
 	}
 

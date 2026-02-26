@@ -13,6 +13,7 @@ type HostConfig struct {
 	InitCommands   []string `toml:"init_commands"`
 	SessionName    string   `toml:"session_name"`
 	CommandTimeout Duration `toml:"command_timeout"`
+	StartupTimeout Duration `toml:"startup_timeout"`
 	Term           string   `toml:"term"`
 	HistoryLimit   int      `toml:"history_limit"`
 }
@@ -21,6 +22,7 @@ type Config struct {
 	SessionName       string                `toml:"session_name"`
 	ConnectionTimeout Duration              `toml:"connection_timeout"`
 	CommandTimeout    Duration              `toml:"command_timeout"`
+	StartupTimeout    Duration              `toml:"startup_timeout"`
 	MaxMessageSize    int                   `toml:"max_message_size"`
 	SocketPath        string                `toml:"socket_path"`
 	TmuxSocketPath    string                `toml:"tmux_socket_path"`
@@ -105,6 +107,7 @@ func (c Config) HostSettings(host string) HostConfig {
 			InitCommands:   c.InitCommands,
 			SessionName:    c.SessionName,
 			CommandTimeout: c.CommandTimeout,
+			StartupTimeout: c.StartupTimeout,
 			Term:           c.Term,
 			HistoryLimit:   c.HistoryLimit,
 		}
@@ -117,6 +120,9 @@ func (c Config) HostSettings(host string) HostConfig {
 	}
 	if hc.CommandTimeout.Duration == 0 {
 		hc.CommandTimeout = c.CommandTimeout
+	}
+	if hc.StartupTimeout.Duration == 0 {
+		hc.StartupTimeout = c.StartupTimeout
 	}
 	if hc.InitCommands == nil {
 		hc.InitCommands = c.InitCommands
