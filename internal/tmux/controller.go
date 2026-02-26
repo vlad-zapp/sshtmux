@@ -76,7 +76,7 @@ type commandResponse struct {
 func NewController(r io.Reader, w io.Writer) *RealController {
 	c := &RealController{
 		w:        w,
-		outputCh: make(chan string, 1024),
+		outputCh: make(chan string, 65536),
 		startup:  make(chan struct{}),
 		done:     make(chan struct{}),
 	}

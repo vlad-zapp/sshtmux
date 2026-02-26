@@ -280,7 +280,7 @@ func drainChannel(ch <-chan string) {
 
 // outputIdleTimeout is how long to wait without new data before considering
 // output complete. Resets on each received chunk.
-const outputIdleTimeout = 100 * time.Millisecond
+const outputIdleTimeout = 200 * time.Millisecond
 
 // outputHardTimeout is the absolute maximum time to spend draining output
 // after command completion, regardless of data flow.

@@ -346,10 +346,11 @@ func TestControllerHighVolumeOutput(t *testing.T) {
 	_, cmdW := io.Pipe()
 	respR, respW := io.Pipe()
 
+	const totalMessages = 100000
 	// Send many %output notifications. readLoop should not deadlock;
-	// excess output beyond the 1024-buffer channel is dropped.
+	// excess output beyond the 65536-buffer channel is dropped.
 	go func() {
-		for i := range 5000 {
+		for i := range totalMessages {
 			fmt.Fprintf(respW, "%%output %%0 line-%d\\012\n", i)
 		}
 		respW.Close()
@@ -360,7 +361,7 @@ func TestControllerHighVolumeOutput(t *testing.T) {
 
 	<-ctrl.done
 
-	// Drain whatever is in the channel. We should have at most 1024 items
+	// Drain whatever is in the channel. We should have at most 65536 items
 	// (the channel buffer size) since no reader was actively consuming.
 	count := 0
 	for {
@@ -375,13 +376,13 @@ func TestControllerHighVolumeOutput(t *testing.T) {
 		}
 	}
 done:
-	if count > 1024 {
-		t.Errorf("got %d items from output channel, expected at most 1024", count)
+	if count > 65536 {
+		t.Errorf("got %d items from output channel, expected at most 65536", count)
 	}
 	if count == 0 {
 		t.Error("expected at least some items in output channel")
 	}
-	t.Logf("received %d of 5000 output items (channel buffer=1024)", count)
+	t.Logf("received %d of %d output items (channel buffer=65536)", count, totalMessages)
 }
 
 func TestControllerMultilineData(t *testing.T) {
