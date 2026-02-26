@@ -21,7 +21,8 @@ const (
 
 // Client communicates with the sshtmux daemon over a Unix socket.
 type Client struct {
-	SocketPath string
+	SocketPath     string
+	MaxMessageSize uint32 // 0 means use DefaultMaxMessageSize
 }
 
 // NewClient creates a client with the given socket path.
@@ -56,7 +57,7 @@ func (c *Client) Send(req daemon.Request) (*daemon.Response, error) {
 	// Streaming messages contain log lines that are printed immediately.
 	for {
 		var resp daemon.Response
-		if err := daemon.ReadMessage(conn, &resp); err != nil {
+		if err := daemon.ReadMessage(conn, &resp, c.MaxMessageSize); err != nil {
 			return nil, fmt.Errorf("read response: %w", err)
 		}
 

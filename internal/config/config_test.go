@@ -31,6 +31,9 @@ func TestDefault(t *testing.T) {
 	if cfg.HistoryLimit != 50000 {
 		t.Errorf("HistoryLimit = %d, want %d", cfg.HistoryLimit, 50000)
 	}
+	if cfg.MaxMessageSize != 100*1024*1024 {
+		t.Errorf("MaxMessageSize = %d, want %d", cfg.MaxMessageSize, 100*1024*1024)
+	}
 }
 
 func TestLoadNonexistent(t *testing.T) {
@@ -437,6 +440,22 @@ func TestHostSettings_TermAndHistoryLimitOverride(t *testing.T) {
 	}
 	if hs.HistoryLimit != 10000 {
 		t.Errorf("HistoryLimit = %d, want %d", hs.HistoryLimit, 10000)
+	}
+}
+
+func TestLoadMaxMessageSize(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := `max_message_size = 52428800`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxMessageSize != 50*1024*1024 {
+		t.Errorf("MaxMessageSize = %d, want %d", cfg.MaxMessageSize, 50*1024*1024)
 	}
 }
 

@@ -25,12 +25,14 @@ type Daemon struct {
 	pool           *ConnPool
 	listener       net.Listener
 	commandTimeout time.Duration
+	maxMessageSize uint32
 	wg             sync.WaitGroup
 	done           chan struct{}
 }
 
-// NewDaemon creates a new daemon with the given pool, socket path, and command timeout.
-func NewDaemon(pool *ConnPool, socketPath string, commandTimeout time.Duration) (*Daemon, error) {
+// NewDaemon creates a new daemon with the given pool, socket path, command timeout, and max IPC message size.
+// maxMessageSize of 0 means use DefaultMaxMessageSize.
+func NewDaemon(pool *ConnPool, socketPath string, commandTimeout time.Duration, maxMessageSize uint32) (*Daemon, error) {
 	// Remove stale socket file
 	os.Remove(socketPath)
 
@@ -43,6 +45,7 @@ func NewDaemon(pool *ConnPool, socketPath string, commandTimeout time.Duration) 
 		pool:           pool,
 		listener:       listener,
 		commandTimeout: commandTimeout,
+		maxMessageSize: maxMessageSize,
 		done:           make(chan struct{}),
 	}, nil
 }
@@ -98,7 +101,7 @@ func (d *Daemon) handleConn(conn net.Conn) {
 	defer conn.Close()
 
 	var req Request
-	if err := ReadMessage(conn, &req); err != nil {
+	if err := ReadMessage(conn, &req, d.maxMessageSize); err != nil {
 		log.Printf("read request: %v", err)
 		return
 	}

@@ -40,7 +40,16 @@ func New(sender Sender) *Server {
 
 	mcp.AddTool(s.server, &mcp.Tool{
 		Name:        "sshtmux_exec",
-		Description: "Execute a command on a remote host via SSH + tmux. Connections are cached for reuse. Default command timeout is 30 seconds. Use the 'timeout' parameter (in seconds) to override, up to a maximum of 600 seconds (10 minutes).",
+		Description: `Execute a command on a remote host via SSH + tmux. Connections are cached for reuse.
+
+IMPORTANT: Commands run inside an interactive tmux pane that persists between calls. The terminal must remain in a clean, usable state after each command.
+
+Rules:
+- Do NOT use "set -euo pipefail" or wrap commands in shell scripts. Send plain, single-line commands only.
+- Do NOT use literal "\n" escape sequences in commands. If you need to run multiple commands, chain them with "&&" or ";", or make separate tool calls.
+- Do NOT use heredocs, multiline strings, or multiline scripts.
+
+Default command timeout is 30 seconds. Use the 'timeout' parameter (in seconds) to override, up to a maximum of 600 seconds (10 minutes).`,
 	}, s.handleExec)
 
 	return s

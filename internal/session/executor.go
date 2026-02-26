@@ -135,8 +135,8 @@ func (e *Executor) Exec(ctx context.Context, command string, timeout time.Durati
 			val := strings.TrimSpace(result.Data)
 			if val != "" {
 				exitCode, _ := strconv.Atoi(val)
-				// Collect any remaining buffered output.
-				collectRemaining(outputCh, &output)
+				// Drain remaining output with a grace period for in-flight data.
+				drainWithGrace(outputCh, &output)
 				rawOutput := strings.TrimRight(output.String(), "\n")
 				vlog.Logf(ctx, "exec: done exit_code=%d output_len=%d", exitCode, len(rawOutput))
 				return &ExecResult{Output: rawOutput, ExitCode: exitCode}, nil
@@ -278,13 +278,28 @@ func drainChannel(ch <-chan string) {
 	}
 }
 
-// collectRemaining reads all currently buffered data from the channel into the builder.
-func collectRemaining(ch <-chan string, buf *strings.Builder) {
+// outputIdleTimeout is how long to wait without new data before considering
+// output complete. Resets on each received chunk.
+const outputIdleTimeout = 100 * time.Millisecond
+
+// outputHardTimeout is the absolute maximum time to spend draining output
+// after command completion, regardless of data flow.
+const outputHardTimeout = 30 * time.Second
+
+// drainWithGrace collects remaining output after command completion.
+// Waits up to outputIdleTimeout for each new chunk (resets on data),
+// with an absolute cap of outputHardTimeout.
+func drainWithGrace(ch <-chan string, buf *strings.Builder) {
+	hard := time.After(outputHardTimeout)
+	idle := time.After(outputIdleTimeout)
 	for {
 		select {
 		case data := <-ch:
 			buf.WriteString(data)
-		default:
+			idle = time.After(outputIdleTimeout)
+		case <-idle:
+			return
+		case <-hard:
 			return
 		}
 	}

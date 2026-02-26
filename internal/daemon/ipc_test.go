@@ -19,7 +19,7 @@ func TestWriteReadRequest(t *testing.T) {
 		t.Fatalf("WriteMessage: %v", err)
 	}
 	var got Request
-	if err := ReadMessage(&buf, &got); err != nil {
+	if err := ReadMessage(&buf, &got, 0); err != nil {
 		t.Fatalf("ReadMessage: %v", err)
 	}
 	if got != req {
@@ -38,7 +38,7 @@ func TestWriteReadResponse(t *testing.T) {
 		t.Fatalf("WriteMessage: %v", err)
 	}
 	var got Response
-	if err := ReadMessage(&buf, &got); err != nil {
+	if err := ReadMessage(&buf, &got, 0); err != nil {
 		t.Fatalf("ReadMessage: %v", err)
 	}
 	if got != resp {
@@ -57,7 +57,7 @@ func TestWriteReadErrorResponse(t *testing.T) {
 		t.Fatalf("WriteMessage: %v", err)
 	}
 	var got Response
-	if err := ReadMessage(&buf, &got); err != nil {
+	if err := ReadMessage(&buf, &got, 0); err != nil {
 		t.Fatalf("ReadMessage: %v", err)
 	}
 	if got != resp {
@@ -74,7 +74,7 @@ func TestReadMessageTruncated(t *testing.T) {
 	buf.WriteString("short")
 
 	var req Request
-	err := ReadMessage(&buf, &req)
+	err := ReadMessage(&buf, &req, 0)
 	if err == nil {
 		t.Error("expected error for truncated message")
 	}
@@ -83,11 +83,11 @@ func TestReadMessageTruncated(t *testing.T) {
 func TestReadMessageTooLarge(t *testing.T) {
 	var buf bytes.Buffer
 	var lenBuf [4]byte
-	binary.BigEndian.PutUint32(lenBuf[:], maxMessageSize+1)
+	binary.BigEndian.PutUint32(lenBuf[:], DefaultMaxMessageSize+1)
 	buf.Write(lenBuf[:])
 
 	var req Request
-	err := ReadMessage(&buf, &req)
+	err := ReadMessage(&buf, &req, 0)
 	if err == nil {
 		t.Error("expected error for oversized message")
 	}
@@ -99,7 +99,7 @@ func TestReadMessageTooLarge(t *testing.T) {
 func TestReadMessageEmptyReader(t *testing.T) {
 	var buf bytes.Buffer
 	var req Request
-	err := ReadMessage(&buf, &req)
+	err := ReadMessage(&buf, &req, 0)
 	if err == nil {
 		t.Error("expected error for empty reader")
 	}
@@ -114,7 +114,7 @@ func TestReadMessageInvalidJSON(t *testing.T) {
 	buf.Write(data)
 
 	var req Request
-	err := ReadMessage(&buf, &req)
+	err := ReadMessage(&buf, &req, 0)
 	if err == nil {
 		t.Error("expected error for invalid JSON")
 	}
@@ -134,7 +134,7 @@ func TestMultipleMessagesRoundTrip(t *testing.T) {
 	}
 	for i, want := range reqs {
 		var got Request
-		if err := ReadMessage(&buf, &got); err != nil {
+		if err := ReadMessage(&buf, &got, 0); err != nil {
 			t.Fatalf("ReadMessage[%d]: %v", i, err)
 		}
 		if got != want {

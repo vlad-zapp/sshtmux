@@ -21,6 +21,7 @@ type Config struct {
 	SessionName       string                `toml:"session_name"`
 	ConnectionTimeout Duration              `toml:"connection_timeout"`
 	CommandTimeout    Duration              `toml:"command_timeout"`
+	MaxMessageSize    int                   `toml:"max_message_size"`
 	SocketPath        string                `toml:"socket_path"`
 	TmuxSocketPath    string                `toml:"tmux_socket_path"`
 	PreCommand        string                `toml:"pre_command"`
@@ -52,6 +53,7 @@ func Default() Config {
 		SessionName:       "sshtmux",
 		ConnectionTimeout: Duration{5 * time.Minute},
 		CommandTimeout:    Duration{30 * time.Second},
+		MaxMessageSize:    100 * 1024 * 1024, // 100 MB
 		SocketPath:        socketPath,
 		IgnoreHostKeys:    true,
 		Term:              "dumb",

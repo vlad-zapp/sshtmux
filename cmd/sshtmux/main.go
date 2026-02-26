@@ -78,6 +78,12 @@ func loadConfig() config.Config {
 	return cfg
 }
 
+func newClient(cfg config.Config) *client.Client {
+	c := client.NewClient(cfg.SocketPath)
+	c.MaxMessageSize = uint32(cfg.MaxMessageSize)
+	return c
+}
+
 func runExec(args []string) {
 	fs := flag.NewFlagSet("exec", flag.ExitOnError)
 	timeoutFlag := fs.String("timeout", "", "Command timeout (e.g. 30s, 1m, 5m). Default: 30s")
@@ -112,7 +118,7 @@ func runExec(args []string) {
 	vlog.Printf("cli: exec host=%q user=%q command=%q timeout=%d", host, user, command, timeoutSecs)
 
 	cfg := loadConfig()
-	c := client.NewClient(cfg.SocketPath)
+	c := newClient(cfg)
 
 	vlog.Printf("cli: ensuring daemon is running (socket=%s)", cfg.SocketPath)
 	if err := c.EnsureDaemon(); err != nil {
@@ -175,7 +181,7 @@ func runDaemon(args []string) {
 	}
 
 	pool := daemon.NewConnPool(factory, cfg.ConnectionTimeout.Duration)
-	d, err := daemon.NewDaemon(pool, cfg.SocketPath, cfg.CommandTimeout.Duration)
+	d, err := daemon.NewDaemon(pool, cfg.SocketPath, cfg.CommandTimeout.Duration, uint32(cfg.MaxMessageSize))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -191,7 +197,7 @@ func runDaemon(args []string) {
 
 func runMCP() {
 	cfg := loadConfig()
-	c := client.NewClient(cfg.SocketPath)
+	c := newClient(cfg)
 
 	if err := c.EnsureDaemon(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error starting daemon: %v\n", err)
@@ -207,7 +213,7 @@ func runMCP() {
 
 func runStatus() {
 	cfg := loadConfig()
-	c := client.NewClient(cfg.SocketPath)
+	c := newClient(cfg)
 
 	resp, err := c.Status()
 	if err != nil {
@@ -236,7 +242,7 @@ func runDisconnect(args []string) {
 
 	host, user := parseHostUser(args[0])
 	cfg := loadConfig()
-	c := client.NewClient(cfg.SocketPath)
+	c := newClient(cfg)
 
 	resp, err := c.Disconnect(host, user)
 	if err != nil {
@@ -252,7 +258,7 @@ func runDisconnect(args []string) {
 
 func runShutdown() {
 	cfg := loadConfig()
-	c := client.NewClient(cfg.SocketPath)
+	c := newClient(cfg)
 
 	resp, err := c.Shutdown()
 	if err != nil {

@@ -96,7 +96,7 @@ func startTestDaemon(t *testing.T) (string, func()) {
 	t.Helper()
 	pool := daemon.NewConnPool(testFactory, 5*time.Minute)
 	sockPath := filepath.Join(t.TempDir(), "test.sock")
-	d, err := daemon.NewDaemon(pool, sockPath, 30*time.Second)
+	d, err := daemon.NewDaemon(pool, sockPath, 30*time.Second, 0)
 	if err != nil {
 		t.Fatalf("NewDaemon: %v", err)
 	}

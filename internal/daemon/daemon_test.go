@@ -37,7 +37,7 @@ func startTestDaemon(t *testing.T) (*Daemon, string) {
 	t.Helper()
 	pool := NewConnPool(testFactory, 5*time.Minute)
 	sockPath := filepath.Join(t.TempDir(), "test.sock")
-	d, err := NewDaemon(pool, sockPath, 30*time.Second)
+	d, err := NewDaemon(pool, sockPath, 30*time.Second, 0)
 	if err != nil {
 		t.Fatalf("NewDaemon: %v", err)
 	}
@@ -63,7 +63,7 @@ func sendRequest(t *testing.T, sockPath string, req Request) Response {
 	var allLogs strings.Builder
 	for {
 		var resp Response
-		if err := ReadMessage(conn, &resp); err != nil {
+		if err := ReadMessage(conn, &resp, 0); err != nil {
 			t.Fatalf("ReadMessage: %v", err)
 		}
 		if resp.Streaming {
@@ -204,7 +204,7 @@ func TestDaemonConcurrentClients(t *testing.T) {
 				return
 			}
 			var resp Response
-			if err := ReadMessage(conn, &resp); err != nil {
+			if err := ReadMessage(conn, &resp, 0); err != nil {
 				errs <- err
 				return
 			}
@@ -256,7 +256,7 @@ func TestDaemonConcurrentVerboseRequests(t *testing.T) {
 			// Read all messages (streaming logs + final response)
 			for {
 				var resp Response
-				if err := ReadMessage(conn, &resp); err != nil {
+				if err := ReadMessage(conn, &resp, 0); err != nil {
 					errs <- err
 					return
 				}
@@ -336,7 +336,7 @@ func TestDaemonExecTimeoutEvictsSession(t *testing.T) {
 
 	pool := NewConnPool(factory, 5*time.Minute)
 	sockPath := filepath.Join(t.TempDir(), "test.sock")
-	d, err := NewDaemon(pool, sockPath, 500*time.Millisecond) // short timeout
+	d, err := NewDaemon(pool, sockPath, 500*time.Millisecond, 0) // short timeout
 	if err != nil {
 		t.Fatalf("NewDaemon: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestDaemonExecPerRequestTimeout(t *testing.T) {
 	pool := NewConnPool(factory, 5*time.Minute)
 	sockPath := filepath.Join(t.TempDir(), "test.sock")
 	// Default timeout is long (30s), but per-request timeout is short
-	d, err := NewDaemon(pool, sockPath, 30*time.Second)
+	d, err := NewDaemon(pool, sockPath, 30*time.Second, 0)
 	if err != nil {
 		t.Fatalf("NewDaemon: %v", err)
 	}
@@ -422,7 +422,7 @@ func TestDaemonExecPerRequestTimeoutZeroUsesDefault(t *testing.T) {
 	pool := NewConnPool(factory, 5*time.Minute)
 	sockPath := filepath.Join(t.TempDir(), "test.sock")
 	// Default timeout is very short
-	d, err := NewDaemon(pool, sockPath, 500*time.Millisecond)
+	d, err := NewDaemon(pool, sockPath, 500*time.Millisecond, 0)
 	if err != nil {
 		t.Fatalf("NewDaemon: %v", err)
 	}
@@ -466,7 +466,7 @@ func TestDaemonExecTimeoutCreatesNewSessionOnRetry(t *testing.T) {
 
 	pool := NewConnPool(factory, 5*time.Minute)
 	sockPath := filepath.Join(t.TempDir(), "test.sock")
-	d, err := NewDaemon(pool, sockPath, 500*time.Millisecond)
+	d, err := NewDaemon(pool, sockPath, 500*time.Millisecond, 0)
 	if err != nil {
 		t.Fatalf("NewDaemon: %v", err)
 	}
