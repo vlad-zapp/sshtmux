@@ -34,6 +34,11 @@ type Options struct {
 	HistoryLimit   int
 }
 
+// startupTimeout bounds the entire tmux startup sequence (handshake, pane
+// discovery, init commands) to prevent indefinite hangs when SSH connections
+// die silently (e.g. through proxies).
+const startupTimeout = 30 * time.Second
+
 // New creates a new session: SSH connect → tmux -C → init commands.
 func New(ctx context.Context, dialer sshclient.Dialer, host, user string, opts Options) (*Session, error) {
 	vlog.Logf(ctx, "session: creating for host=%q user=%q session_name=%q", host, user, opts.SessionName)
@@ -50,16 +55,52 @@ func New(ctx context.Context, dialer sshclient.Dialer, host, user string, opts O
 	}
 
 	vlog.Logf(ctx, "session: starting tmux (pre_command=%q tmux_socket=%q)", opts.PreCommand, opts.TmuxSocketPath)
-	if err := s.startTmux(ctx, opts); err != nil {
-		client.Close()
-		return nil, fmt.Errorf("start tmux: %w", err)
+	if err := s.startTmux(ctx, opts, true); err != nil {
+		// kill-session may have killed the tmux server (last session),
+		// which can take down the SSH connection. Reconnect and retry
+		// without kill — the old session is already dead.
+		vlog.Logf(ctx, "session: first attempt failed (%v), reconnecting without kill", err)
+		s.cleanupSSH()
+
+		client, err = dialer.Dial(ctx, host, user)
+		if err != nil {
+			return nil, fmt.Errorf("ssh redial: %w", err)
+		}
+		s.client = client
+
+		if err := s.startTmux(ctx, opts, false); err != nil {
+			client.Close()
+			return nil, fmt.Errorf("start tmux (retry): %w", err)
+		}
 	}
 
 	return s, nil
 }
 
+// cleanupSSH closes the SSH session and client without touching the tmux controller.
+func (s *Session) cleanupSSH() {
+	if s.sshSess != nil {
+		s.sshSess.Close()
+		s.sshSess = nil
+	}
+	if s.client != nil {
+		s.client.Close()
+		s.client = nil
+	}
+	s.ctrl = nil
+	s.executor = nil
+}
+
 // startTmux launches tmux in control mode and sets up the controller.
-func (s *Session) startTmux(ctx context.Context, opts Options) error {
+// When killExisting is true, it kills any prior tmux session on the same socket
+// before creating a new one, ensuring clean state. If this causes the SSH
+// connection to die (e.g. when the killed session was the last one on the
+// server), the caller should reconnect and retry with killExisting=false.
+func (s *Session) startTmux(ctx context.Context, opts Options, killExisting bool) error {
+	// Apply a startup-specific timeout to prevent indefinite hangs.
+	startCtx, startCancel := context.WithTimeout(ctx, startupTimeout)
+	defer startCancel()
+
 	preCommand := opts.PreCommand
 	tmuxSocketPath := opts.TmuxSocketPath
 	sess, err := s.client.NewSession()
@@ -87,16 +128,21 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 		return fmt.Errorf("stderr pipe: %w", err)
 	}
 
-	// Build tmux command. Kill any existing session first to ensure a clean
-	// state, then create a new one. The old -A (attach-or-create) flag caused
-	// stale pane state to persist across reconnections.
+	// Build tmux command.
 	tmuxBase := "tmux"
 	if tmuxSocketPath != "" {
 		tmuxBase += " -S " + tmux.ShellQuote(tmuxSocketPath)
 	}
 	quotedName := tmux.ShellQuote(s.SessionName)
-	tmuxCmd := fmt.Sprintf("%s kill-session -t %s 2>/dev/null; %s -C new-session -s %s",
-		tmuxBase, quotedName, tmuxBase, quotedName)
+	var tmuxCmd string
+	if killExisting {
+		// Kill any existing session first to ensure clean state.
+		// The old -A (attach-or-create) flag caused stale pane state.
+		tmuxCmd = fmt.Sprintf("%s kill-session -t %s 2>/dev/null; %s -C new-session -s %s",
+			tmuxBase, quotedName, tmuxBase, quotedName)
+	} else {
+		tmuxCmd = fmt.Sprintf("%s -C new-session -s %s", tmuxBase, quotedName)
+	}
 
 	if preCommand != "" {
 		// Pre-command opens a new shell (e.g. "sudo -i"), so we can't use
@@ -139,8 +185,8 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 		select {
 		case <-readDone:
 			vlog.Logf(ctx, "session: pre-command ready (stdout data received)")
-		case <-ctx.Done():
-			return fmt.Errorf("pre-command readiness: %w", ctx.Err())
+		case <-startCtx.Done():
+			return fmt.Errorf("pre-command readiness: %w", startCtx.Err())
 		}
 
 		vlog.Logf(ctx, "session: sending tmux command: %s", tmuxCmd)
@@ -156,7 +202,7 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 	s.ctrl = ctrl
 
 	// Wait for tmux initial %begin/%end handshake
-	if err := ctrl.WaitStartup(ctx); err != nil {
+	if err := ctrl.WaitStartup(startCtx); err != nil {
 		return fmt.Errorf("tmux startup: %w", err)
 	}
 	vlog.Logf(ctx, "session: tmux handshake complete")
@@ -164,13 +210,13 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 	s.executor = NewExecutor(ctrl)
 
 	// Discover pane ID from initial output
-	if err := s.discoverPane(ctx); err != nil {
+	if err := s.discoverPane(startCtx); err != nil {
 		return fmt.Errorf("discover pane: %w", err)
 	}
 
 	// Discover tmux socket path so pane-embedded commands use an explicit -S flag
 	// instead of relying on $TMUX (which may be absent after sudo/toor).
-	if sp, err := ctrl.SendCommand(ctx, "display-message -p '#{socket_path}'"); err == nil {
+	if sp, err := ctrl.SendCommand(startCtx, "display-message -p '#{socket_path}'"); err == nil {
 		val := strings.TrimSpace(sp.Data)
 		if val != "" && val[0] == '/' {
 			s.executor.SocketPath = val
@@ -184,7 +230,7 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 
 	// Disable mouse mode — it generates escape sequences that interfere
 	// with output parsing in control mode.
-	if _, err := ctrl.SendCommand(ctx, "set-option -p mouse off"); err != nil {
+	if _, err := ctrl.SendCommand(startCtx, "set-option -p mouse off"); err != nil {
 		return fmt.Errorf("disable mouse: %w", err)
 	}
 
@@ -193,12 +239,12 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 	if historyLimit <= 0 {
 		historyLimit = 50000
 	}
-	ctrl.SendCommand(ctx, fmt.Sprintf("set-option -p history-limit %d", historyLimit))
+	ctrl.SendCommand(startCtx, fmt.Sprintf("set-option -p history-limit %d", historyLimit))
 
 	// Wait for shell init scripts to run, then send Ctrl-C to dismiss any
 	// prompts they may produce (e.g., SSH host key verification).
 	time.Sleep(1 * time.Second)
-	ctrl.SendCommand(ctx, fmt.Sprintf("send-keys -t %s C-c C-c", ctrl.PaneID()))
+	ctrl.SendCommand(startCtx, fmt.Sprintf("send-keys -t %s C-c C-c", ctrl.PaneID()))
 	time.Sleep(200 * time.Millisecond)
 	drainChannel(ctrl.OutputCh())
 
@@ -223,7 +269,7 @@ func (s *Session) startTmux(ctx context.Context, opts Options) error {
 	initLine := strings.Join(initParts, "; ")
 
 	vlog.Logf(ctx, "session: running init: %s", initLine)
-	if err := s.executor.RunInit(ctx, initLine); err != nil {
+	if err := s.executor.RunInit(startCtx, initLine); err != nil {
 		return fmt.Errorf("init: %w", err)
 	}
 
