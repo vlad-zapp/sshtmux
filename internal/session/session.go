@@ -56,48 +56,21 @@ func New(ctx context.Context, dialer sshclient.Dialer, host, user string, opts O
 	}
 
 	vlog.Logf(ctx, "session: starting tmux (pre_command=%q tmux_socket=%q)", opts.PreCommand, opts.TmuxSocketPath)
-	if err := s.startTmux(ctx, opts, true); err != nil {
-		// kill-session may have killed the tmux server (last session),
-		// which can take down the SSH connection. Reconnect and retry
-		// without kill — the old session is already dead.
-		vlog.Logf(ctx, "session: first attempt failed (%v), reconnecting without kill", err)
-		s.cleanupSSH()
-
-		client, err = dialer.Dial(ctx, host, user)
-		if err != nil {
-			return nil, fmt.Errorf("ssh redial: %w", err)
-		}
-		s.client = client
-
-		if err := s.startTmux(ctx, opts, false); err != nil {
-			client.Close()
-			return nil, fmt.Errorf("start tmux (retry): %w", err)
-		}
+	if err := s.startTmux(ctx, opts); err != nil {
+		client.Close()
+		return nil, fmt.Errorf("start tmux: %w", err)
 	}
 
 	return s, nil
 }
 
-// cleanupSSH closes the SSH session and client without touching the tmux controller.
-func (s *Session) cleanupSSH() {
-	if s.sshSess != nil {
-		s.sshSess.Close()
-		s.sshSess = nil
-	}
-	if s.client != nil {
-		s.client.Close()
-		s.client = nil
-	}
-	s.ctrl = nil
-	s.executor = nil
-}
-
 // startTmux launches tmux in control mode and sets up the controller.
-// When killExisting is true, it kills any prior tmux session on the same socket
-// before creating a new one, ensuring clean state. If this causes the SSH
-// connection to die (e.g. when the killed session was the last one on the
-// server), the caller should reconnect and retry with killExisting=false.
-func (s *Session) startTmux(ctx context.Context, opts Options, killExisting bool) error {
+//
+// Creates an auto-named session first (always succeeds even if an old session
+// exists on the same server), then from within control mode kills the old
+// session and renames ours. This avoids the problem where killing the last
+// session causes the tmux server to exit and takes down the SSH connection.
+func (s *Session) startTmux(ctx context.Context, opts Options) error {
 	// Apply a startup-specific timeout to prevent indefinite hangs.
 	timeout := opts.StartupTimeout
 	if timeout <= 0 {
@@ -133,21 +106,14 @@ func (s *Session) startTmux(ctx context.Context, opts Options, killExisting bool
 		return fmt.Errorf("stderr pipe: %w", err)
 	}
 
-	// Build tmux command.
+	// Build tmux command. Create an auto-named session (no -s flag) so it
+	// always succeeds even if an old session with our desired name exists.
+	// We'll kill the old session and rename from within control mode.
 	tmuxBase := "tmux"
 	if tmuxSocketPath != "" {
 		tmuxBase += " -S " + tmux.ShellQuote(tmuxSocketPath)
 	}
-	quotedName := tmux.ShellQuote(s.SessionName)
-	var tmuxCmd string
-	if killExisting {
-		// Kill any existing session first to ensure clean state.
-		// The old -A (attach-or-create) flag caused stale pane state.
-		tmuxCmd = fmt.Sprintf("%s kill-session -t %s 2>/dev/null; %s -C new-session -s %s",
-			tmuxBase, quotedName, tmuxBase, quotedName)
-	} else {
-		tmuxCmd = fmt.Sprintf("%s -C new-session -s %s", tmuxBase, quotedName)
-	}
+	tmuxCmd := fmt.Sprintf("%s -C new-session", tmuxBase)
 
 	if preCommand != "" {
 		// Pre-command opens a new shell (e.g. "sudo -i"), so we can't use
@@ -211,6 +177,16 @@ func (s *Session) startTmux(ctx context.Context, opts Options, killExisting bool
 		return fmt.Errorf("tmux startup: %w", err)
 	}
 	vlog.Logf(ctx, "session: tmux handshake complete")
+
+	// Now that our session is alive, safely kill any old session with the
+	// desired name (the server stays up because our session exists), then
+	// rename ours. Errors are ignored — the old session may not exist.
+	quotedName := tmux.ShellQuote(s.SessionName)
+	ctrl.SendCommand(startCtx, "kill-session -t "+quotedName)
+	if _, err := ctrl.SendCommand(startCtx, "rename-session "+quotedName); err != nil {
+		return fmt.Errorf("rename session: %w", err)
+	}
+	vlog.Logf(ctx, "session: renamed to %s", s.SessionName)
 
 	s.executor = NewExecutor(ctrl)
 
