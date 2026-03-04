@@ -61,7 +61,11 @@ func (p *ConnPool) Get(ctx context.Context, host, user string) (*session.Session
 
 		// Check cache
 		if entry, ok := p.sessions[key]; ok {
-			if entry.sess.Alive() {
+			if p.ttl > 0 && time.Since(entry.lastUsed) > p.ttl {
+				vlog.Logf(ctx, "pool: evicting expired session for %s", key)
+				delete(p.sessions, key)
+				go entry.sess.Close()
+			} else if entry.sess.Alive() {
 				entry.lastUsed = time.Now()
 				p.mu.Unlock()
 				vlog.Logf(ctx, "pool: cache hit for %s", key)

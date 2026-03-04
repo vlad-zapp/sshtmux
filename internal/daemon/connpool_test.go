@@ -55,11 +55,11 @@ func (c *noopController) SendCommandPipeline(ctx context.Context, cmds []string)
 	return results, nil
 }
 func (c *noopController) OutputCh() <-chan string { return c.outputCh }
-func (c *noopController) PaneID() string           { return c.paneID }
-func (c *noopController) SetPaneID(id string)      { c.paneID = id }
-func (c *noopController) Alive() bool              { return c.alive }
-func (c *noopController) Detach() error            { return nil }
-func (c *noopController) Close() error             { return nil }
+func (c *noopController) PaneID() string          { return c.paneID }
+func (c *noopController) SetPaneID(id string)     { c.paneID = id }
+func (c *noopController) Alive() bool             { return c.alive }
+func (c *noopController) Detach() error           { return nil }
+func (c *noopController) Close() error            { return nil }
 
 // decodeHexSendKeys decodes a send-keys -H command back to text.
 // Input format: "send-keys -H -t %0 65 63 68 6f ..."
@@ -378,6 +378,36 @@ func TestConnPoolReapExpired(t *testing.T) {
 	status = pool.Status()
 	if len(status) != 0 {
 		t.Errorf("Status has %d entries after reap, want 0", len(status))
+	}
+}
+
+func TestConnPoolGetEvictsExpiredSessionImmediately(t *testing.T) {
+	var createCount atomic.Int32
+	factory := func(ctx context.Context, host, user string) (*session.Session, error) {
+		createCount.Add(1)
+		ctrl := &noopController{paneID: "%0", alive: true, outputCh: make(chan string, 1024)}
+		return session.NewFromController(ctrl, host, user), nil
+	}
+
+	pool := NewConnPool(factory, 50*time.Millisecond)
+	defer pool.Close()
+
+	ctx := context.Background()
+	s1, err := pool.Get(ctx, "host1", "user1")
+	if err != nil {
+		t.Fatalf("first Get: %v", err)
+	}
+	time.Sleep(60 * time.Millisecond)
+
+	s2, err := pool.Get(ctx, "host1", "user1")
+	if err != nil {
+		t.Fatalf("second Get: %v", err)
+	}
+	if s1 == s2 {
+		t.Error("expected a new session after TTL expiry")
+	}
+	if createCount.Load() != 2 {
+		t.Errorf("createCount = %d, want 2", createCount.Load())
 	}
 }
 
